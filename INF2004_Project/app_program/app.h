@@ -27,6 +27,18 @@
  * --------------------------------------------------------------------- */
 #define TASK_STACK_SIZE		2048	/* bytes; tm_printf needs ~1 KB */
 
+/* ---------------------------------------------------------------------
+ *  Mission logic (S3 line following + barcode turns, S5 obstacle bypass).
+ *  This is the only code that makes the wheels turn on its own.  It is
+ *  always off in test builds.  Set to 0 to bench-test a normal image with
+ *  the robot holding still.
+ * --------------------------------------------------------------------- */
+#if APP_TEST
+#define APP_MISSION_ENABLE	0
+#else
+#define APP_MISSION_ENABLE	1
+#endif
+
 /* Create and start a task.  prc = TP_PRC1 (core 0), TP_PRC2 (core 1), or
    0 for "any core".  Defined in app_main.c. */
 IMPORT ID app_start_task(FP entry, PRI pri, UW prc, const char *name);

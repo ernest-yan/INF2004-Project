@@ -30,6 +30,7 @@ static app_lock_t s_lock;
 #define B2_STOPPED_STABLE_MS  (200U)
 #define B2_MAX_DUTY          (1000U)
 #define B2_MIN_OUTPUT        (0U)
+#define B2_GOAL_START_US     (100000ULL)
 
 static b2_config_t s_cfg;
 static b2_status_t s_status;
@@ -47,6 +48,7 @@ static uint32_t s_prev_ticks[2];
 static int32_t s_requested[2];
 static int32_t s_integral[2];
 static uint64_t s_goal_started_us;
+static uint64_t s_wheel_started_us[2];  /* last time this wheel went 0 -> moving */
 static uint64_t s_last_poll_us;
 static uint64_t s_last_stopped_check_us;
 static uint32_t s_pwm_wrap;
@@ -344,11 +346,42 @@ void b2_get_status(b2_status_t *out)
         app_unlock(&s_lock, irq);
     }
 }
+bool b2_goal_start(b2_goal_t *goal, const b2_command_t *cmd)
+{
+    b2_status_t st;
+    b2_get_status(&st);
+    goal->goals_done_at_start = st.goals_done;
+    goal->started_us = app_time_us_64();
+    goal->seen_running = false;
+    return b2_submit_command(cmd);
+}
+b2_goal_result_t b2_goal_check(b2_goal_t *goal)
+{
+    b2_status_t st;
+    b2_get_status(&st);
+    if (st.goals_done != goal->goals_done_at_start)
+    {
+        return B2_GOAL_DONE;
+    }
+    if (st.state == B2_EXECUTE_GOAL)
+    {
+        goal->seen_running = true;
+        return B2_GOAL_RUNNING;
+    }
+    /* Still READY shortly after the start: waiting for the next b2_poll(). */
+    if ((st.state == B2_READY) && !goal->seen_running &&
+        ((app_time_us_64() - goal->started_us) < B2_GOAL_START_US))
+    {
+        return B2_GOAL_RUNNING;
+    }
+    return B2_GOAL_FAILED;
+}
 static void b2_start_command(const b2_command_t *cmd, uint32_t tick_l,
                              uint32_t tick_r, uint64_t now)
 {
     const bool continuous_speed = (cmd->type == B2_CMD_SPEED) &&
                                   (s_status.state == B2_TRACK_SPEED);
+    const int32_t previous[2] = {s_requested[0], s_requested[1]};
     s_active = *cmd;
     if (!continuous_speed)
     {
@@ -395,6 +428,15 @@ static void b2_start_command(const b2_command_t *cmd, uint32_t tick_l,
                              s_cfg.wheel_circumference_mm);
         if (s_goal_ticks < B2_MIN_TICKS) { s_goal_ticks = B2_MIN_TICKS; }
         s_status.state = B2_EXECUTE_GOAL;
+    }
+    /* A wheel held at 0 (steering) has old encoder edges: give it the full
+     * stall window again when it restarts, or it reads as stalled at once. */
+    for (uint32_t i = 0U; i < 2U; ++i)
+    {
+        if ((previous[i] == 0) && (s_requested[i] != 0))
+        {
+            s_wheel_started_us[i] = now;
+        }
     }
     s_was_moving = true;
 }
@@ -496,6 +538,9 @@ void b2_poll(void)
             if (reached[1]) { s_requested[1] = 0; }
             if (reached[0] && reached[1])
             {
+                irq = app_lock(&s_lock);
+                ++s_status.goals_done;
+                app_unlock(&s_lock, irq);
                 b2_stop();
                 b2_queue_event(B2_EVENT_GOAL_DONE, B2_FAULT_NONE);
                 b2_deliver_event();
@@ -529,7 +574,7 @@ void b2_poll(void)
                  (s_status.state == B2_TRACK_SPEED)) &&
                 (b2_abs32(request) >= 40) &&
                 (age > ((uint64_t)s_cfg.encoder_stall_ms * 1000ULL)) &&
-                ((now - s_goal_started_us) >
+                ((now - s_wheel_started_us[i]) >
                   ((uint64_t)s_cfg.encoder_stall_ms * 1000ULL)))
             {
                 b2_fault_now(B2_FAULT_ENCODER_STALL);

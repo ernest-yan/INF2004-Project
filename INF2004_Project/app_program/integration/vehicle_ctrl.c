@@ -50,7 +50,7 @@ static void vc_handle_s5_event(const subsystem5_event_t *ev)
 		break;
 	case subsystem5_EVENT_PROFILE_READY:
 		tm_printf((UB*)"[VC] S5 profile: closest %u mm @ %u deg, width ~%u mm, "
-			  "side %s. Bypass not implemented: holding stopped.\n",
+			  "side %s\n",
 			  (unsigned)ev->profile.closest_mm,
 			  (unsigned)ev->profile.closest_angle_deg,
 			  (unsigned)ev->profile.approximate_width_mm,
@@ -98,7 +98,6 @@ static void vc_task(INT stacd, void *exinf)
 	uint32_t		last_edges = 0u;
 	uint32_t		still_since = 0u;
 	uint32_t		last_health = 0u;
-	char			ch;
 
 	(void)stacd; (void)exinf;
 
@@ -111,14 +110,7 @@ static void vc_task(INT stacd, void *exinf)
 			vc_handle_s5_event(&ev);
 		}
 
-		/* 2. decoded barcode characters (IF-01) */
-		while (tk_rcv_mbf(mbf_barcode, &ch, TMO_POL) == 1) {
-			tm_printf((UB*)"[VC] barcode '%c' -> action %d "
-				  "(not executed yet)\n", ch,
-				  (int)get_action_for_character(ch));
-		}
-
-		/* 3. S5 snapshot is authoritative (an event can be lost):
+		/* 2. S5 snapshot is authoritative (an event can be lost):
 		      never let the wheels run while S5 says stop. */
 		subsystem5_get_status(&s5);
 		b2_get_status(&s2);
@@ -126,7 +118,7 @@ static void vc_task(INT stacd, void *exinf)
 			b2_stop();
 		}
 
-		/* 4. tell S5 the robot is still, so it may start its scan */
+		/* 3. tell S5 the robot is still, so it may start its scan */
 		{
 			const uint32_t now = app_time_us_32();
 			const uint32_t edges = s2.left_encoder_edges +

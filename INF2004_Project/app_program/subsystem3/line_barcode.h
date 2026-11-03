@@ -29,11 +29,12 @@
 
 /*
  * TIMEOUT_US: time without an edge before the collected scan is finalized.
- * Start at 50000 us. If separate characters are merged, reduce it;
- * if a scan is cut off too early, increase it.
+ * It must be longer than the widest bar takes to pass the sensor at the
+ * slowest driving speed: a 9 mm wide bar (141 mm barcode) at the 45 mm/s of a
+ * steering car takes 200 ms.
  */
 #define MAX_BARS       60
-#define TIMEOUT_US     50000u
+#define TIMEOUT_US     400000u
 #define MIN_EDGE_US    100u
 #define DECODE_COOLDOWN_US 300000u
 
@@ -91,6 +92,33 @@ MovementAction_t get_action_for_character(char c);
  * 1 ms).  If you set this above 0, narrow bars are mis-measured.
  */
 #define S3_POLL_DELAY_MS	0
+
+/*
+ * Line following + barcode turns (line_follow_task, APP_MISSION_ENABLE only).
+ * PROVISIONAL values: tune on the real track, wheels lifted first.
+ */
+#define S3_FOLLOW_PRI		17	/* priority band 16-17 (TEAM.md) */
+#define S3_FOLLOW_PERIOD_MS	10
+#define S3_LINE_SPEED_MM_S	100	/* both wheels, on the line */
+#define S3_STEER_SPEED_MM_S	90	/* outer wheel while steering (inner = 0) */
+#define S3_TURN_SPEED_MM_S	80	/* barcode turns */
+#define S3_TURN_TIMEOUT_MS	6000
+#define S3_JUNCTION_CONFIRM_MS	40	/* both sensors on the line this long */
+#define S3_JUNCTION_ADVANCE_MM	60	/* line sensors to wheel axle: measure */
+#define S3_LINE_LOST_MS		1500	/* search this long, then stop */
+#define S3_START_DELAY_MS	3000	/* after boot, before the first move */
+
+/*
+ * The real letter -> movement mapping arrives over MQTT at the demo through
+ * set_mqtt_action_mapping() (subsystem 1).  Until that exists this bench
+ * mapping lets the turns be tested.  MQTT replaces it as soon as it arrives.
+ * Set to 0 once subsystem 1 is in: the mapping must not be hard-coded.
+ */
+#define S3_BENCH_MAPPING	1
+#define S3_BENCH_FORWARD	'F'
+#define S3_BENCH_UTURN		'U'
+#define S3_BENCH_LEFT		'L'
+#define S3_BENCH_RIGHT		'R'
 
 /* IF-01: S3 -> any subsystem.  Message buffer, one byte per decoded Code 39
    character ('A'..'Z').  Receive with tk_rcv_mbf(mbf_barcode, &c, TMO_FEVR). */

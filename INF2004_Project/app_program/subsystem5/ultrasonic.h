@@ -24,6 +24,16 @@
 #define subsystem5_OBSTACLE_ZONE_MM   (500U)
 #define subsystem5_SIDE_CLEAR_MM      (600U)
 
+/* PROVISIONAL obstacle bypass path (APP_MISSION_ENABLE only). The sideways
+ * leg is half the obstacle width + MARGIN, the leg past it is the distance to
+ * the obstacle + PASS, and the way back looks for the line for the sideways
+ * distance + SEEK before giving up. */
+#define subsystem5_BYPASS_MARGIN_MM   (150U)
+#define subsystem5_BYPASS_PASS_MM     (300U)
+#define subsystem5_BYPASS_SEEK_MM     (200U)
+#define subsystem5_BYPASS_SPEED_MM_S  (80U)
+#define subsystem5_BYPASS_TIMEOUT_MS  (10000U)
+
 typedef enum
 {
     subsystem5_STATE_MONITOR = 0,
@@ -31,6 +41,7 @@ typedef enum
     subsystem5_STATE_COARSE,
     subsystem5_STATE_FINE,
     subsystem5_STATE_PROFILE_READY,
+    subsystem5_STATE_BYPASS,
     subsystem5_STATE_FAULT
 } subsystem5_state_t;
 
@@ -48,7 +59,8 @@ typedef enum
     subsystem5_FAULT_SCAN_INVALID,
     subsystem5_FAULT_STOP_TIMEOUT,
     subsystem5_FAULT_EVENT_DELIVERY,
-    subsystem5_FAULT_NO_SAFE_SIDE
+    subsystem5_FAULT_NO_SAFE_SIDE,
+    subsystem5_FAULT_BYPASS
 } subsystem5_fault_t;
 
 typedef struct
@@ -65,7 +77,7 @@ typedef struct
     subsystem5_fault_t fault;
     uint16_t front_mm;
     uint8_t front_valid;
-    uint8_t stop_required;  /* Sticky until authorized recovery/reset. */
+    uint8_t stop_required;  /* Sticky until recovery/reset; 0 during BYPASS. */
     uint8_t scan_complete;
     subsystem5_profile_t profile;
 } subsystem5_status_t;

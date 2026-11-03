@@ -21,17 +21,20 @@
  *	  subsystem1/  LED heartbeat on GP19 (template example, kept)  prio 12  any
  *	  subsystem2/  motion: motors GP8-11, encoders GP6/GP7          prio 14  core 0
  *	  subsystem3/  line GP2/GP4 + Code 39 barcode GP16              prio 16  core 1
+ *	               line following + barcode turns                   prio 17  core 0
  *	  subsystem4/  GY-511 LSM303DLHC on I2C1 GP26/GP27              prio 18  core 0
  *	  subsystem5/  HC-SR04 GP0/GP1 + SG90 servo GP12                prio 20  core 0
  *	  integration/ vehicle_ctrl: team glue between the subsystems   prio 11  core 0
  *
  *	How they talk to each other (TEAM.md section 5):
- *	  IF-01  S3 -> VC   message buffer mbf_barcode   (owned by S3)
+ *	  IF-01  S3 -> S3   message buffer mbf_barcode   (owned by S3)
  *	  IF-02  S5 -> VC   message buffer mbf_s5_events (owned by S5)
- *	  IF-03  VC -> S2   b2_stop() / b2_submit_command() function API
+ *	  IF-03  VC, S3, S5 -> S2   b2_stop() / b2_submit_command() function API
  *	  IF-04  S4 -> S2   b2_emergency_brake() on impact / sensor fault
  *	  IF-05  S2 -> S4   b2_get_status() odometry -> b4_update_travel_mm()
  *	  IF-06  VC -> S5   subsystem5_confirm_robot_stopped()
+ *	  IF-07  S5 -> S3   subsystem5_get_status(): S3 holds while S5 is busy
+ *	  IF-08  S3 -> S5   get_line_barcode_data_safe(): bypass finds the line
  *
  *	Build with the defaults (SMP=1, CRASH_REPORT=0): GP0/GP1 carry the
  *	HC-SR04, and the S3 barcode task needs core 1 to itself.

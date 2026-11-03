@@ -63,12 +63,10 @@ bench tests listed in `testing/`.
 
 ## Still missing (mission logic: team decision, not a build fix)
 
-`vehicle_ctrl` is a **safe** controller: it only ever stops the robot. Not
-written yet:
-- line following (S3 `line_detected`/raw bits -> `b2_submit_command(B2_CMD_SPEED)`),
-- executing a barcode action (`get_action_for_character()` -> B2 turn goal),
-- the obstacle bypass after S5's `PROFILE_READY`, then
-  `subsystem5_ack_line_recovered()`,
-- an operator reset path for a latched S2 brake / S4 impact.
-
-These belong in `vehicle_ctrl.c`, which already has the inputs wired up.
+`vehicle_ctrl` is a **safe** controller: it only ever stops the robot. Line
+following and barcode turns are now in `subsystem3/line_barcode.c`, and the
+obstacle bypass is in `subsystem5/ultrasonic.c` (`APP_MISSION_ENABLE` in
+`app.h`). Not written yet:
+- receiving the letter -> movement mapping over MQTT (subsystem 1): call
+  `set_mqtt_action_mapping()`, then set `S3_BENCH_MAPPING` to 0,
+- an operator reset path for a latched S2 brake / S4 impact (reset the Pico).

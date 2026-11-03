@@ -2,14 +2,13 @@
  *	line_barcode.c
  *	Subsystem 3 -- line sensors + Code 39 barcode decoder.
  *
- *	This ONE file holds three things, in this order:
+ *	This ONE file holds these things, in this order:
  *	  1. the driver / decoder
- *	  2. the subsystem glue the template needs (subsystem3_init/_start,
+ *	  2. line following and barcode turns (line_follow_task)
+ *	  3. the subsystem glue the template needs (subsystem3_init/_start,
  *	     the barcode task)
- *	  3. the on-target tests (only compiled with: make TEST=1)
  *
  *	Ported from the Pico SDK version.  Every change is marked "PORT:".
- *	The decoding logic itself is unchanged.
  *
  *	Call rules (TEAM.md section 3: one owning task per peripheral):
  *	  - line_barcode_create()  once, from subsystem3_init()
@@ -21,6 +20,10 @@
 
 #include "line_barcode.h"
 #include "../test_report.h"
+#include "../app_hw.h"
+#include "../subsystem2/tkernel_adapter.h"
+#include "../subsystem4/tkernel_adapter.h"
+#include "../subsystem5/ultrasonic.h"
 
 /* =====================================================================
  *  1. Driver / decoder
@@ -79,7 +82,8 @@ ER line_barcode_create(void)
  * 1 = wide, 0 = narrow. The standard has 3 wide elements per character.
  *
  * These are the same A-Z patterns used by the original project.
- * '*' is the Code 39 start/stop character; it is recognized but not emitted.
+ * '*' is the Code 39 start/stop character; it frames the letter (see
+ * decode_collected_scan) and is not emitted.
  */
 typedef struct {
     char character;
@@ -98,6 +102,9 @@ static const Code39Map CODE39_TABLE[] = {
     {'V', 0b011000001}, {'W', 0b111000000}, {'X', 0b010010001},
     {'Y', 0b110010000}, {'Z', 0b011010000}
 };
+
+#define CODE39_STAR_PATTERN	0b010010100
+#define CODE39_FRAME_ELEMENTS	29	/* '*' gap letter gap '*' */
 
 static LineBarcodeData_t g_system_data = {0};
 
@@ -233,13 +240,11 @@ static bool classify_nine(const uint32_t in[9], uint16_t *pattern_out)
     return true;
 }
 
+/* Exact match only: the scan direction is already known from the frame. */
 static char lookup_code39(uint16_t pattern)
 {
-    uint16_t reversed = reverse_9bits(pattern);
-
     for (int i = 0; i < (int)(sizeof(CODE39_TABLE) / sizeof(CODE39_TABLE[0])); ++i) {
-        if (CODE39_TABLE[i].pattern == pattern ||
-            CODE39_TABLE[i].pattern == reversed) {
+        if (CODE39_TABLE[i].pattern == pattern) {
             /* Start/stop '*' is framing, not an application character. */
             return CODE39_TABLE[i].character == '*' ? '\0'
                                                      : CODE39_TABLE[i].character;
@@ -249,28 +254,47 @@ static char lookup_code39(uint16_t pattern)
     return '\0';
 }
 
+static bool classify_at(uint8_t start, uint16_t *pattern_out)
+{
+    uint32_t candidate[9];
+
+    for (int i = 0; i < 9; ++i) {
+        candidate[i] = g_widths[start + i];
+    }
+    return classify_nine(candidate, pattern_out);
+}
+
 /*
- * Try every contiguous nine-duration window in the collected scan.
- * This helps when the first edge occurs partway through a character.
- * Returns the first non-framing Code 39 character found.
+ * A barcode is '*' gap letter gap '*'.  A letter is only accepted between two
+ * start/stop characters, because nine durations taken at the wrong offset can
+ * look like another letter.  The frame also gives the scan direction: read
+ * backwards '*' comes out mirrored, and the letter is mirrored back before the
+ * lookup.  Without this K/U, N/Y, O/X, Q/W, R/V and T/Z could not be told
+ * apart, because each pair are mirror images of each other.
  */
 static char decode_collected_scan(void)
 {
-    if (g_width_count < 9) return '\0';
+    if (g_width_count < CODE39_FRAME_ELEMENTS) return '\0';
 
-    for (uint8_t start = 0; (uint16_t)start + 9u <= g_width_count; ++start) {
-        uint32_t candidate[9];
+    for (uint8_t start = 0;
+         (uint16_t)start + CODE39_FRAME_ELEMENTS <= g_width_count; ++start) {
+        uint16_t first, letter, last;
 
-        for (int i = 0; i < 9; ++i) {
-            candidate[i] = g_widths[start + i];
-        }
-
-        uint16_t pattern;
-        if (!classify_nine(candidate, &pattern)) {
+        if (!classify_at(start, &first) ||
+            !classify_at((uint8_t)(start + 20u), &last) ||
+            !classify_at((uint8_t)(start + 10u), &letter)) {
             continue;
         }
 
-        char c = lookup_code39(pattern);
+        if (first != CODE39_STAR_PATTERN || last != CODE39_STAR_PATTERN) {
+            if (reverse_9bits(first) != CODE39_STAR_PATTERN ||
+                reverse_9bits(last) != CODE39_STAR_PATTERN) {
+                continue;
+            }
+            letter = reverse_9bits(letter);
+        }
+
+        char c = lookup_code39(letter);
         if (c != '\0') {
             return c;
         }
@@ -380,10 +404,226 @@ void process_sensors_distance_packed(uint32_t current_ticks,
 
 
 /* =====================================================================
- *  2. Subsystem glue (called from app_program/app_main.c)
+ *  2. Line following and barcode turns
+ *
+ *  Runs in its own task on core 0, so the barcode task on core 1 keeps
+ *  measuring bar widths undisturbed.  Sensor logic with only two line
+ *  sensors (1 = on the line, same active-HIGH logic as above):
+ *    centre          on the line: straight (left too = junction: straight)
+ *    left only       the line is to the left: steer left
+ *    neither         keep steering to the side the line was last seen on
+ *                    (from centre-only that is right: the left sensor would
+ *                    have seen it otherwise), give up after S3_LINE_LOST_MS
+ *
+ *  A decoded barcode is only stored.  Its movement runs at the next
+ *  cross-junction (both sensors on the line), after driving on until the
+ *  wheels are over the junction.  Then the stored letter is cleared.
+ *
+ *  S5 has priority over the wheels: nothing here moves them unless S5 is
+ *  monitoring normally with no stop request.
  * ===================================================================== */
 
 EXPORT ID	mbf_barcode;	/* IF-01, see line_barcode.h */
+
+#if APP_MISSION_ENABLE
+
+#if S3_BENCH_MAPPING
+#warning "S3_BENCH_MAPPING=1: barcode mapping is hard-coded until MQTT sends one. Set it to 0 once subsystem 1 is in."
+#endif
+
+typedef enum {
+	LF_IDLE = 0,	/* wheels stopped, waiting for a line */
+	LF_FOLLOW,
+	LF_ADVANCE,	/* driving the wheels onto the junction */
+	LF_TURN		/* the turn for the stored barcode is running */
+} line_follow_state_t;
+
+/* TRUE when S3 may drive: no S5 obstacle handling, no latched S2 brake. */
+static BOOL line_follow_allowed(void)
+{
+	subsystem5_status_t s5;
+	b2_status_t s2;
+
+	subsystem5_get_status(&s5);
+	b2_get_status(&s2);
+	return (s5.state == subsystem5_STATE_MONITOR) && (s5.stop_required == 0U) &&
+	       (s2.brake_latched == 0U) && (s2.state != B2_FAULT);
+}
+
+static void line_follow_drive(const LineBarcodeData_t *d, BOOL *line_is_left)
+{
+	b2_command_t cmd = {0};
+
+	cmd.type = B2_CMD_SPEED;
+	if (d->ir_center_raw) {
+		*line_is_left = FALSE;
+		cmd.left_mm_s = S3_LINE_SPEED_MM_S;
+		cmd.right_mm_s = S3_LINE_SPEED_MM_S;
+	} else {
+		if (d->ir_left_raw) {
+			*line_is_left = TRUE;
+		}
+		cmd.left_mm_s = *line_is_left ? 0 : S3_STEER_SPEED_MM_S;
+		cmd.right_mm_s = *line_is_left ? S3_STEER_SPEED_MM_S : 0;
+	}
+	(void)b2_submit_command(&cmd);
+}
+
+/* Goals are only accepted from READY, so stop the speed tracking first. */
+static BOOL line_follow_goal(b2_goal_t *goal, b2_cmd_type_t type,
+			     uint16_t amount)
+{
+	b2_command_t cmd = {0};
+
+	cmd.type = type;
+	if (type == B2_CMD_MOVE_FORWARD) {
+		cmd.distance_mm = amount;
+	} else {
+		cmd.turn_degrees = amount;
+	}
+	cmd.goal_speed_mm_s = S3_TURN_SPEED_MM_S;
+	cmd.timeout_ms = S3_TURN_TIMEOUT_MS;
+
+	b2_stop();
+	return b2_goal_start(goal, &cmd);
+}
+
+static void line_follow_task(INT stacd, void *exinf)
+{
+	line_follow_state_t state = LF_IDLE;
+	LineBarcodeData_t d;
+	b2_goal_t goal;
+	BOOL line_is_left = FALSE;
+	BOOL junction_armed = TRUE;
+	uint32_t lost_since = 0u;
+	uint32_t junction_since = 0u;
+	BOOL on_junction = FALSE;
+	MovementAction_t action = MOVE_NONE;
+	char stored = '\0';
+	char ch;
+
+	(void)stacd; (void)exinf;
+
+	/* Moving during S4's calibration would ruin it, and without S4 there is
+	   no impact brake, so wait for both before the first move. */
+	(void)tk_dly_tsk(S3_START_DELAY_MS);
+	tm_printf((UB*)"[S3] waiting for S2 ready and S4 calibration\n");
+	for (;;) {
+		b4_status_t s4;
+
+		if (s2_ready() && s4_ready()) {
+			b4_get_status(&s4);
+			if (s4.calibration_ready != 0U) {
+				break;
+			}
+		}
+		(void)tk_dly_tsk(100);
+	}
+	tm_printf((UB*)"[S3] line following armed\n");
+
+	while (1) {
+		d = get_line_barcode_data_safe();
+
+		if (!line_follow_allowed()) {
+			if (state != LF_IDLE) {
+				b2_stop();
+				state = LF_IDLE;
+				tm_printf((UB*)"[S3] holding: S5 or S2 needs the wheels stopped\n");
+			}
+		} else if (state == LF_IDLE) {
+			if (d.line_detected) {
+				state = LF_FOLLOW;
+				lost_since = app_time_us_32();
+				tm_printf((UB*)"[S3] line found, following\n");
+			}
+		}
+
+		/* Store the newest barcode for the next junction. */
+		while (tk_rcv_mbf(mbf_barcode, &ch, TMO_POL) == 1) {
+			stored = ch;
+			tm_printf((UB*)"[S3] barcode '%c' stored\n", ch);
+		}
+
+		if (state == LF_ADVANCE) {
+			const b2_goal_result_t result = b2_goal_check(&goal);
+
+			if (result == B2_GOAL_DONE) {
+				if (line_follow_goal(&goal,
+				    (action == MOVE_RIGHT) ? B2_CMD_TURN_RIGHT : B2_CMD_TURN_LEFT,
+				    (action == MOVE_UTURN) ? 180U : 90U)) {
+					state = LF_TURN;
+				} else {
+					state = LF_IDLE;
+					tm_printf((UB*)"[S3] junction turn refused\n");
+				}
+			} else if (result == B2_GOAL_FAILED) {
+				state = LF_IDLE;
+				tm_printf((UB*)"[S3] junction advance failed\n");
+			}
+		} else if (state == LF_TURN) {
+			const b2_goal_result_t result = b2_goal_check(&goal);
+
+			if (result == B2_GOAL_DONE) {
+				state = LF_FOLLOW;
+				lost_since = app_time_us_32();
+			} else if (result == B2_GOAL_FAILED) {
+				state = LF_IDLE;
+				tm_printf((UB*)"[S3] junction turn failed\n");
+			}
+		} else if (state == LF_FOLLOW) {
+			if (d.line_detected) {
+				lost_since = app_time_us_32();
+			}
+
+			/* One action per junction: re-arm only after leaving it. */
+			if (!d.cross_junction) {
+				on_junction = FALSE;
+				junction_armed = TRUE;
+			} else if (!on_junction) {
+				on_junction = TRUE;
+				junction_since = app_time_us_32();
+			}
+			if (on_junction && junction_armed &&
+			    ((uint32_t)(app_time_us_32() - junction_since) >=
+			     (S3_JUNCTION_CONFIRM_MS * 1000u))) {
+				junction_armed = FALSE;
+				action = get_action_for_character(stored);
+				tm_printf((UB*)"[S3] junction, barcode '%c' -> action %d\n",
+					  (stored != '\0') ? stored : '-', (int)action);
+				stored = '\0';
+				if ((action == MOVE_LEFT) || (action == MOVE_RIGHT) ||
+				    (action == MOVE_UTURN)) {
+					if (line_follow_goal(&goal, B2_CMD_MOVE_FORWARD,
+					    S3_JUNCTION_ADVANCE_MM)) {
+						state = LF_ADVANCE;
+					} else {
+						state = LF_IDLE;
+						tm_printf((UB*)"[S3] junction advance refused\n");
+					}
+					(void)tk_dly_tsk(S3_FOLLOW_PERIOD_MS);
+					continue;
+				}
+			}
+
+			if ((uint32_t)(app_time_us_32() - lost_since) >=
+			    (S3_LINE_LOST_MS * 1000u)) {
+				b2_stop();
+				state = LF_IDLE;
+				tm_printf((UB*)"[S3] line lost, stopped\n");
+			} else {
+				line_follow_drive(&d, &line_is_left);
+			}
+		}
+
+		(void)tk_dly_tsk(S3_FOLLOW_PERIOD_MS);
+	}
+}
+
+#endif /* APP_MISSION_ENABLE */
+
+/* =====================================================================
+ *  3. Subsystem glue (called from app_program/app_main.c)
+ * ===================================================================== */
 
 /* The barcode task.  Owns GP2, GP4 and GP16 (TEAM.md section 3). */
 static void barcode_task(INT stacd, void *exinf)
@@ -428,7 +668,14 @@ EXPORT ER subsystem3_init(void)
 	cmbf.bufsz  = 64;		/* room for a few queued chars (+ headers) */
 	cmbf.maxmsz = 1;
 	mbf_barcode = tk_cre_mbf(&cmbf);
-	return (mbf_barcode < E_OK) ? mbf_barcode : E_OK;
+	if (mbf_barcode < E_OK) {
+		return mbf_barcode;
+	}
+#if APP_MISSION_ENABLE && S3_BENCH_MAPPING
+	set_mqtt_action_mapping(S3_BENCH_FORWARD, S3_BENCH_UTURN,
+				S3_BENCH_LEFT, S3_BENCH_RIGHT);
+#endif
+	return E_OK;
 }
 
 EXPORT ER subsystem3_start(void)
@@ -437,5 +684,12 @@ EXPORT ER subsystem3_start(void)
 	   it away from core 0.  The pin is ignored on a single-core build. */
 	ID tid = app_start_task(barcode_task, S3_PRI_MAIN, TP_PRC2,
 				"barcode_task");
+#if APP_MISSION_ENABLE
+	if (tid >= E_OK) {
+		/* Core 0: it sleeps between loops, and core 1 is kept busy. */
+		tid = app_start_task(line_follow_task, S3_FOLLOW_PRI, TP_PRC1,
+				     "line_follow_task");
+	}
+#endif
 	return (tid < E_OK) ? tid : E_OK;
 }

@@ -10,15 +10,12 @@
  *	  - wheels confirmed still (S2 odometry quiet) while S5 waits
  *	                                     -> subsystem5_confirm_robot_stopped()
  *	    so S5 can run its servo scan instead of timing out after 1.5 s
- *	  - drains S3's mbf_barcode (IF-01) and logs character + mapped action
  *	  - checks at boot that the RP2040 microsecond TIMER really runs at 1 MHz
  *	  - prints a one-line health summary every VC_HEALTH_PRINT_MS
  *
- *	What it deliberately does NOT do yet (mission logic, team decision):
- *	  - drive the motors forward / follow the line (S3 -> S2 steering)
- *	  - execute a barcode action as a B2 turn
- *	  - perform the obstacle bypass after S5's PROFILE_READY
- *	Until those are written the robot never moves on its own.
+ *	The mission logic lives in the subsystems (APP_MISSION_ENABLE in app.h):
+ *	  - S3 line_barcode.c: line following and barcode turns
+ *	  - S5 ultrasonic.c:   obstacle bypass after PROFILE_READY
  */
 
 #ifndef VEHICLE_CTRL_H

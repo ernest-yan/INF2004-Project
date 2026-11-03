@@ -1,6 +1,7 @@
 /*
  * Subsystem 5: HC-SR04 + SG90 servo, RP2040/Pico SDK.
- * All motion commands are advisory events for VehicleController.
+ * Stop requests are advisory events for VehicleController; the obstacle bypass
+ * drives through the S2 function API (IF-03).
  * NO motor PWM/encoder GPIOs are touched in this file.
  */
 /*
@@ -13,6 +14,8 @@
  */
 #include "ultrasonic.h"
 #include "../app_hw.h"
+#include "../subsystem2/motion.h"
+#include "../subsystem3/line_barcode.h"
 
 /* PORT: replaces time_us_32().  RP2040 TIMER counts microseconds; TIMERAWL
  * (offset 0x28) is a non-latching read of the low 32 bits. */
@@ -471,6 +474,164 @@ static void subsystem5_scan_step(uint32_t now_us)
     }
 }
 
+#if APP_MISSION_ENABLE
+/* Obstacle bypass: a rectangle around the obstacle on the side the scan chose,
+ * then forward until the line is found and one last turn back onto it.  Runs
+ * one S2 goal at a time and never blocks this task. */
+#define subsystem5_BYPASS_STEPS   (7U)
+#define subsystem5_BYPASS_SEEK    (5U)    /* index of the line-seeking leg */
+
+typedef struct
+{
+    b2_cmd_type_t type;
+    uint16_t amount;        /* mm for a move, degrees for a turn */
+} subsystem5_bypass_step_t;
+
+static subsystem5_bypass_step_t s_bypass_steps[subsystem5_BYPASS_STEPS];
+static uint8_t s_bypass_index;
+static b2_goal_t s_bypass_goal;
+
+static void subsystem5_bypass_fail(void)
+{
+    b2_stop();
+    subsystem5_abort_pending_echo();
+    subsystem5_fault(subsystem5_FAULT_BYPASS);
+    tm_printf((UB*)"[S5] bypass failed at step %u, stopped\n",
+              (unsigned)s_bypass_index);
+}
+
+static bool subsystem5_bypass_start_step(void)
+{
+    const subsystem5_bypass_step_t *step = &s_bypass_steps[s_bypass_index];
+    b2_command_t cmd;
+
+    subsystem5_memset(&cmd, 0, (int)sizeof(cmd));
+    cmd.type = step->type;
+    if (step->type == B2_CMD_MOVE_FORWARD)
+    {
+        cmd.distance_mm = step->amount;
+    }
+    else
+    {
+        cmd.turn_degrees = step->amount;
+    }
+    cmd.goal_speed_mm_s = subsystem5_BYPASS_SPEED_MM_S;
+    cmd.timeout_ms = subsystem5_BYPASS_TIMEOUT_MS;
+    return b2_goal_start(&s_bypass_goal, &cmd);
+}
+
+static void subsystem5_bypass_begin(void)
+{
+    const b2_cmd_type_t away =
+        (s_status.profile.candidate_side == subsystem5_SIDE_LEFT) ?
+        B2_CMD_TURN_LEFT : B2_CMD_TURN_RIGHT;
+    const b2_cmd_type_t back =
+        (away == B2_CMD_TURN_LEFT) ? B2_CMD_TURN_RIGHT : B2_CMD_TURN_LEFT;
+    const uint16_t sideways = (uint16_t)
+        ((s_status.profile.approximate_width_mm / 2U) +
+         subsystem5_BYPASS_MARGIN_MM);
+    const subsystem5_bypass_step_t steps[subsystem5_BYPASS_STEPS] =
+    {
+        { away, 90U },
+        { B2_CMD_MOVE_FORWARD, sideways },
+        { back, 90U },
+        { B2_CMD_MOVE_FORWARD,
+          (uint16_t)(s_status.profile.closest_mm + subsystem5_BYPASS_PASS_MM) },
+        { back, 90U },
+        { B2_CMD_MOVE_FORWARD,
+          (uint16_t)(sideways + subsystem5_BYPASS_SEEK_MM) },
+        { away, 90U }
+    };
+    uint8_t i;
+
+    for (i = 0U; i < subsystem5_BYPASS_STEPS; i++)
+    {
+        s_bypass_steps[i] = steps[i];
+    }
+    s_bypass_index = 0U;
+    s_status.state = subsystem5_STATE_BYPASS;
+    s_status.stop_required = 0U;  /* This motion is authorized: VC must not stop it. */
+    subsystem5_abort_pending_echo();
+    tm_printf((UB*)"[S5] bypassing on the %s\n",
+              (away == B2_CMD_TURN_LEFT) ? "left" : "right");
+    if (!subsystem5_bypass_start_step())
+    {
+        subsystem5_bypass_fail();
+    }
+}
+
+static void subsystem5_bypass_next(void)
+{
+    s_bypass_index++;
+    if (s_bypass_index >= subsystem5_BYPASS_STEPS)
+    {
+        tm_printf((UB*)"[S5] bypass done, back on the line\n");
+        subsystem5_reset_for_monitor();
+    }
+    else if (!subsystem5_bypass_start_step())
+    {
+        subsystem5_bypass_fail();
+    }
+    else
+    {
+        /* Next goal is running. */
+    }
+}
+
+static void subsystem5_bypass_step(uint32_t now_us)
+{
+    const bool moving_forward =
+        (s_bypass_steps[s_bypass_index].type == B2_CMD_MOVE_FORWARD);
+    b2_goal_result_t result;
+
+    /* Look ahead on the forward legs: the servo is back at 90 degrees. */
+    if (moving_forward)
+    {
+        subsystem5_sample_t ahead;
+
+        if ((s_range_active == 0U) &&
+            ((int32_t)(now_us - s_servo_ready_us) >= 0))
+        {
+            (void)subsystem5_ping_begin(now_us);
+        }
+        ahead.angle_deg = 90U;
+        if (subsystem5_ping_result(now_us, &ahead) && (ahead.valid != 0U))
+        {
+            s_status.front_valid = 1U;
+            s_status.front_mm = ahead.distance_mm;
+            if (ahead.distance_mm <= subsystem5_URGENT_MM)
+            {
+                subsystem5_bypass_fail();
+                return;
+            }
+        }
+    }
+
+    if ((s_bypass_index == subsystem5_BYPASS_SEEK) &&
+        (get_line_barcode_data_safe().line_detected != 0U))
+    {
+        b2_stop();
+        subsystem5_bypass_next();
+        return;
+    }
+
+    result = b2_goal_check(&s_bypass_goal);
+    if ((result == B2_GOAL_FAILED) ||
+        ((result == B2_GOAL_DONE) && (s_bypass_index == subsystem5_BYPASS_SEEK)))
+    {
+        subsystem5_bypass_fail();   /* Stopped, or drove the whole way: no line. */
+    }
+    else if (result == B2_GOAL_DONE)
+    {
+        subsystem5_bypass_next();
+    }
+    else
+    {
+        /* Goal still running. */
+    }
+}
+#endif /* APP_MISSION_ENABLE */
+
 void subsystem5_poll(void)
 {
     const uint32_t now_us = subsystem5_now_us();
@@ -569,6 +730,16 @@ void subsystem5_poll(void)
     {
         subsystem5_scan_step(now_us);
     }
+#if APP_MISSION_ENABLE
+    else if (s_status.state == subsystem5_STATE_PROFILE_READY)
+    {
+        subsystem5_bypass_begin();
+    }
+    else if (s_status.state == subsystem5_STATE_BYPASS)
+    {
+        subsystem5_bypass_step(now_us);
+    }
+#endif
     else
     {
         /* PROFILE_READY / FAULT: remain stopped until VC authorizes. */

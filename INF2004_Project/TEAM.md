@@ -151,7 +151,7 @@ change it only by team agreement. Write down every task you create.
 |---|---|---|
 | 1 | 12–13 | *example:* led_task – 12 – any |
 | 2 | 14–15 | motion_task – 14 – core 0 |
-| 3 | 16–17 | barcode_task – 16 – core 1 (polls without sleeping) |
+| 3 | 16–17 | barcode_task – 16 – core 1 (polls without sleeping); line_follow_task – 17 – core 0 |
 | 4 | 18–19 | imu_task – 18 – core 0 |
 | 5 | 20–21 | ultrasonic_task – 20 – core 0 |
 | team | 11 | vehicle_ctrl – 11 – core 0 |
@@ -166,12 +166,14 @@ sends to it or waits on it. Agree on the data format before coding.
 
 | ID | From → To | Mechanism | Object ID name | Data / meaning | Agreed by |
 |---|---|---|---|---|---|
-| IF-01 | S3 → VC | message buffer (owned by S3) | `mbf_barcode` | 1 byte per decoded Code 39 character ('A'–'Z'); receive with `tk_rcv_mbf` | |
+| IF-01 | S3 → S3 | message buffer (owned by S3) | `mbf_barcode` | 1 byte per decoded Code 39 character ('A'–'Z'); `line_follow_task` receives with `tk_rcv_mbf` | |
 | IF-02 | S5 → VC | message buffer (owned by S5) | `mbf_s5_events` | one `subsystem5_event_t` per STOP_REQUIRED / PROFILE_READY / FAULT; the VC must keep draining it | |
-| IF-03 | VC → S2 | function API (`motion.h`) | — | `b2_stop()`, `b2_submit_command()`, `b2_get_status()`; lock-protected, any task/core | |
+| IF-03 | VC, S3, S5 → S2 | function API (`motion.h`) | — | `b2_stop()`, `b2_submit_command()`, `b2_goal_start()`, `b2_goal_check()`, `b2_get_status()`; lock-protected, any task/core | |
 | IF-04 | S4 → S2 | function call | — | `b2_emergency_brake()` on impact or IMU fault (latched until `b2_authorized_reset_while_stopped()`) | |
 | IF-05 | S2 → S4 | function call | — | `imu_task` reads `b2_get_status()` odometry and feeds `b4_update_travel_mm()` | |
 | IF-06 | VC → S5 | function call | — | `subsystem5_confirm_robot_stopped()` once the encoders are quiet for 100 ms | |
+| IF-07 | S5 → S3 | function call | — | `subsystem5_get_status()`: S3 only drives while S5 is in MONITOR with no stop request | |
+| IF-08 | S3 → S5 | function call | — | `get_line_barcode_data_safe()`: the bypass looks for the line on its way back | |
 
 Each interface is tested by at least one integration test
 (`testing/integration/TEST_LOG.md`).
@@ -183,7 +185,7 @@ limit there. The numbers below are the example's usage.
 
 | Object | Limit | S1 | S2 | S3 | S4 | S5 |
 |---|---|---|---|---|---|---|
-| Task | 32 | 1 | 1 | 1 | 1 | 1 (+1 vehicle_ctrl) |
+| Task | 32 | 1 | 1 | 2 | 1 | 1 (+1 vehicle_ctrl) |
 | Semaphore | 16 | | | | | |
 | Event flag | 16 | | | | | |
 | Mailbox | 12 | | | | | |

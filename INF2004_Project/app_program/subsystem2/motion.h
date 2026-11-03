@@ -65,6 +65,7 @@ typedef struct
     uint16_t left_pwm_permil;
     uint16_t right_pwm_permil;
     uint32_t deadline_misses;
+    uint32_t goals_done;            /* Counts MOVE / TURN goals that finished. */
     uint64_t last_update_us;
 } b2_status_t;
 typedef struct
@@ -72,6 +73,16 @@ typedef struct
     b2_event_type_t type;
     b2_fault_t fault;
 } b2_event_t;
+typedef struct
+{
+    uint32_t goals_done_at_start;
+    uint64_t started_us;
+    bool seen_running;
+} b2_goal_t;
+typedef enum
+{
+    B2_GOAL_RUNNING = 0, B2_GOAL_DONE, B2_GOAL_FAILED
+} b2_goal_result_t;
 typedef bool (*b2_event_publish_fn)(const b2_event_t *ev, void *ctx);
 /* Call once before task startup. Configuration must reflect measured hardware. */
 bool b2_init(const b2_config_t *config, b2_event_publish_fn publish, void *ctx);
@@ -88,4 +99,8 @@ void b2_emergency_brake(void);
 /* Must only be called after authorised reset AND physical safety checks. */
 bool b2_authorized_reset_while_stopped(void);
 void b2_get_status(b2_status_t *out);
+/* Start a MOVE / TURN goal and follow it from a task without blocking.
+ * FAILED means it was stopped, braked or faulted before reaching its goal. */
+bool b2_goal_start(b2_goal_t *goal, const b2_command_t *cmd);
+b2_goal_result_t b2_goal_check(b2_goal_t *goal);
 #endif
