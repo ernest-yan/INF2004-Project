@@ -1,35 +1,59 @@
 /*
  *	subsystem1.c
- *	Subsystem 1 -- LED heartbeat: creates its objects and starts its task.
+ *	Subsystem 1 -- WiFi telemetry and remote commands (Buddy 1).
  *
- *	APIs shown: tk_cre_cyc, tk_sta_cyc
+ *	subsystem1_init():  create our kernel objects
+ *	subsystem1_start(): create and start our telemetry task
+ *
+ *	How the pieces fit (TEAM.md sections 3 and 5):
+ *
+ *	  s1_telemetry_task (ours, priority S1_PRI_TLM)
+ *	      reads every buddy's status, packs frames
+ *	      --> s1_mbf_out (message buffer, owned by us) -->
+ *	  cyw43_utk_task (kernel's WiFi task) runs mqtt_utk.c, which calls
+ *	      tlm_bridge.c to empty s1_mbf_out (TMO_POL) and publishes.
+ *	  Commands come back the other way: mqtt_utk.c -> tlm_bridge.c ->
+ *	      VehicleController (queue) or the E-STOP event flag.
  */
 
 #include "subsystem1.h"
+#include "s1_internal.h"
 
-EXPORT ID	tid_led;	/* IF-05, see subsystem1.h */
-EXPORT ID	cyc_led;
+EXPORT ID s1_mbf_out;
 
 EXPORT ER subsystem1_init(void)
 {
-	T_CCYC	ccyc = {0};
+	T_CMBF	cmbf = {0};
 
-	/* Cyclic handler: once started, the kernel calls led_cyclic_handler
-	   every S1_TICK_MS.  Without TA_STA it is created stopped; it is
-	   started in subsystem1_start(), once the task it wakes exists. */
-	ccyc.cycatr = TA_HLNG;
-	ccyc.cychdr = (FP)led_cyclic_handler;
-	ccyc.cyctim = S1_TICK_MS;	/* period, ms */
-	ccyc.cycphs = S1_TICK_MS;	/* delay before the first call, ms */
-	cyc_led = tk_cre_cyc(&ccyc);
-	return (cyc_led < E_OK) ? cyc_led : E_OK;
+	cmbf.mbfatr = TA_TFIFO;
+	cmbf.bufsz  = (SZ)TLM_MBF_BYTES;	/* total bytes it can hold */
+	cmbf.maxmsz = (INT)TLM_MBF_MSG_MAX;	/* largest single message */
+	s1_mbf_out = tk_cre_mbf(&cmbf);
+	if (s1_mbf_out < E_OK) {
+		return s1_mbf_out;
+	}
+	return E_OK;
 }
 
 EXPORT ER subsystem1_start(void)
 {
-	tid_led = app_start_task(led_task, S1_PRI_LED, 0, "led_task");
-	if (tid_led < E_OK) {
-		return tid_led;
+	T_CTSK	ctsk = {0};
+	ID	tid;
+	ER	er;
+
+	/* Own tk_cre_tsk() instead of app_start_task(): we need a bigger
+	   stack than the shared TASK_STACK_SIZE (JSON mode + tm_sprintf). */
+	ctsk.task    = (FP)s1_telemetry_task;
+	ctsk.itskpri = S1_PRI_TLM;
+	ctsk.stksz   = S1_TLM_STACK;
+	ctsk.tskatr  = TA_HLNG | TA_RNG3;	/* any core */
+
+	tid = tk_cre_tsk(&ctsk);
+	if (tid < E_OK) {
+		CHECK(tid, "telemetry");
+		return tid;
 	}
-	return tk_sta_cyc(cyc_led);	/* start the cyclic handler now */
+	er = tk_sta_tsk(tid, 0);
+	CHECK(er, "telemetry");
+	return er;
 }
