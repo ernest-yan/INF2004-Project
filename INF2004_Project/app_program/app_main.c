@@ -16,24 +16,25 @@
  *	and then puts the initial task to sleep forever.
  *	If usermain() RETURNS, the kernel shuts the whole system down.
  *
- *	The example system: one subsystem per folder, one task each
- *	------------------------------------------------------------
- *	  subsystem1/  LED       blinks GP19, paced by a cyclic handler
- *	  subsystem2/  Producer  makes a "sample" every 300 ms     (core 1)
- *	  subsystem3/  Consumer  collects samples into statistics  (core 0)
- *	  subsystem4/  Monitor   prints reports, pauses/resumes the LED
- *	  subsystem5/  (empty template for the fifth student)
+ *	The IS33 robot: one subsystem per folder
+ *	-----------------------------------------
+ *	  subsystem1/  LED heartbeat on GP19 (template example, kept)  prio 12  any
+ *	  subsystem2/  motion: motors GP8-11, encoders GP6/GP7          prio 14  core 0
+ *	  subsystem3/  line GP2/GP4 + Code 39 barcode GP16              prio 16  core 1
+ *	  subsystem4/  GY-511 LSM303DLHC on I2C1 GP26/GP27              prio 18  core 0
+ *	  subsystem5/  HC-SR04 GP0/GP1 + SG90 servo GP12                prio 20  core 0
+ *	  integration/ vehicle_ctrl: team glue between the subsystems   prio 11  core 0
  *
- *	How they talk to each other (the interfaces, see TEAM.md section 5):
- *	  IF-01  S2 -> S3  mailbox mbx_samples      (owned by S3)
- *	  IF-02  S3 -> S2  semaphore sem_slots + memory pool mpf_samples
- *	                   (owned by S2: S3 hands slots and blocks back)
- *	  IF-03  S3 -> S4  message buffer mbf_summary + event flag flg_events
- *	                   (owned by S4)
- *	  IF-04  S4 -> S3  reads app_stats under mutex mtx_stats (owned by S3)
- *	  IF-05  S4 -> S1  suspends/resumes the LED task tid_led (owned by S1)
- *	The subsystem that RECEIVES or OWNS the data creates the object and
- *	publishes its ID in its header; the other side just uses it.
+ *	How they talk to each other (TEAM.md section 5):
+ *	  IF-01  S3 -> VC   message buffer mbf_barcode   (owned by S3)
+ *	  IF-02  S5 -> VC   message buffer mbf_s5_events (owned by S5)
+ *	  IF-03  VC -> S2   b2_stop() / b2_submit_command() function API
+ *	  IF-04  S4 -> S2   b2_emergency_brake() on impact / sensor fault
+ *	  IF-05  S2 -> S4   b2_get_status() odometry -> b4_update_travel_mm()
+ *	  IF-06  VC -> S5   subsystem5_confirm_robot_stopped()
+ *
+ *	Build with the defaults (SMP=1, CRASH_REPORT=0): GP0/GP1 carry the
+ *	HC-SR04, and the S3 barcode task needs core 1 to itself.
  *
  *	micro T-Kernel APIs used, and where to find them:
  *	  tasks       tk_cre_tsk tk_sta_tsk tk_slp_tsk tk_wup_tsk tk_can_wup
@@ -54,6 +55,14 @@
  */
 
 #include "app.h"
+#include "integration/vehicle_ctrl.h"
+
+#if !TK_SUPPORT_SMP
+#warning "SMP=0: the S3 barcode task never sleeps and will starve S4 and S5. Build with SMP=1."
+#endif
+#if TM_CONSOLE_UART
+#warning "CRASH_REPORT=1 / CONSOLE=uart puts UART0 on GP0/GP1, which carry the S5 HC-SR04: unplug the HC-SR04 before flashing this image."
+#endif
 
 /*
  * Create and start one task (declared in app.h for every subsystem).
@@ -113,6 +122,7 @@ EXPORT INT usermain(void)
 	CHECK(subsystem3_init(), "subsystem3_init");
 	CHECK(subsystem4_init(), "subsystem4_init");
 	CHECK(subsystem5_init(), "subsystem5_init");
+	CHECK(vc_init(), "vc_init");
 
 	/* Phase 2: every subsystem starts its tasks */
 	CHECK(subsystem1_start(), "subsystem1_start");
@@ -120,6 +130,7 @@ EXPORT INT usermain(void)
 	CHECK(subsystem3_start(), "subsystem3_start");
 	CHECK(subsystem4_start(), "subsystem4_start");
 	CHECK(subsystem5_start(), "subsystem5_start");
+	CHECK(vc_start(), "vc_start");
 
 	tm_printf((UB*)"all subsystems started\n\n");
 

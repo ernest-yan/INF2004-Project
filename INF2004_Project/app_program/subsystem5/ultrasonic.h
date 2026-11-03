@@ -5,13 +5,15 @@
 #include <stdint.h>
 
 #include "../app.h"
-#include "subsystem5_profile.h"
+#include "profile.h"
 
 /* Pin allocation (moved off GP4/GP5 to avoid the S3 centre line sensor on GP4).
  * !! GP0/GP1 are also UART0: do NOT build with CRASH_REPORT=1 or CONSOLE=uart
  * !! while the ultrasonic sensor is wired here.  Never use GP23, GP24, GP25
  * !! or GP29 (Pico W radio).
- * If TRIG and ECHO are wired the other way round, swap the two numbers. */
+ * If TRIG and ECHO are wired the other way round, swap the two numbers.
+ * !! HC-SR04 ECHO is a 5 V output: fit a divider (e.g. 1k from ECHO to GP1,
+ * !! 2k from GP1 to GND) -- the RP2040 pins are NOT 5 V tolerant. */
 #define subsystem5_TRIG_GPIO          (0U)
 #define subsystem5_ECHO_GPIO          (1U)
 #define subsystem5_SERVO_GPIO         (12U)
@@ -76,7 +78,7 @@ typedef bool (*subsystem5_event_publish_fn)(const subsystem5_event_t *event, voi
  * creates a mutex.  Call once from subsystem5_init(). */
 int subsystem5_ultrasonic_init(subsystem5_event_publish_fn publish, void *context);
 
-/* PORT: the echo pulse is now timed by polling GP5 (the template has no GPIO
+/* PORT: the echo pulse is now timed by polling the configured ECHO GPIO (the template has no GPIO
  * interrupt API), so subsystem5_echo_gpio_irq() no longer exists. */
 
 /* Call every ~2 ms from exactly one micro T-Kernel task (not an IRQ).

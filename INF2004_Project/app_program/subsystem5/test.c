@@ -1,5 +1,5 @@
 /*
- *	subsystem5_test.c
+ *	test.c
  *	On-target tests for subsystem 5.  Built only with: make TEST=1
  *	Record results in testing/subsystem5/TEST_LOG.md.  IDs: S5-U01, ...
  *
@@ -7,7 +7,7 @@
  *	made-up scans -- no sensor or servo needed.
  */
 
-#include "subsystem5_ultrasonic.h"
+#include "ultrasonic.h"
 #include "../test_report.h"
 
 #if APP_TEST

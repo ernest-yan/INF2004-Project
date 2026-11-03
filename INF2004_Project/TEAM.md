@@ -18,10 +18,11 @@ subsystem, ask its owner or open a pull request for them to review.
 | # | Subsystem (what it does) | Student ID | GitHub username | Code | Tests |
 |---|---|---|---|---|---|
 | 1 | *example:* LED heartbeat on GP19 | | | `app_program/subsystem1/` | `testing/subsystem1/` |
-| 2 | | | | `app_program/subsystem2/` | `testing/subsystem2/` |
+| 2 | Motion control: 2 DC motors (PWM) + 2 wheel encoders, speed/distance/turn goals, emergency brake | | | `app_program/subsystem2/` | `testing/subsystem2/` |
 | 3 | Line sensors + Code 39 barcode reader (left/centre IR line sensors, right IR barcode sensor) | | | `app_program/subsystem3/` | `testing/subsystem3/` |
-| 4 | | | | `app_program/subsystem4/` | `testing/subsystem4/` |
-| 5 | | | | `app_program/subsystem5/` | `testing/subsystem5/` |
+| 4 | GY-511 (LSM303DLHC) accelerometer: impact detection -> brake, hump-height profile | | | `app_program/subsystem4/` | `testing/subsystem4/` |
+| 5 | HC-SR04 ultrasonic + SG90 servo: obstacle stop request and obstacle profile scan | | | `app_program/subsystem5/` | `testing/subsystem5/` |
+| — | *Team glue:* `vehicle_ctrl` task (connects S2/S3/S4/S5) | all | | `app_program/integration/` | `testing/integration/` |
 
 Shared files (`app_program/app_main.c`, `app_program/app.h`, this file)
 are changed only by agreement of the team. The exception is claiming an empty
@@ -48,19 +49,19 @@ fixed.
 | Pin | Owner | Used for |
 |---|---|---|
 | GP23, GP24, GP25, GP29 | *reserved* | Pico W radio |
-| GP0 | | (taken whenever the team builds with `CRASH_REPORT=1`) |
-| GP1 | | (taken whenever the team builds with `CRASH_REPORT=1`) |
+| GP0 | S5 | HC-SR04 TRIG (do not use `CRASH_REPORT=1`) |
+| GP1 | S5 | HC-SR04 ECHO (5 V output: use a divider to 3.3 V; do not use `CRASH_REPORT=1`) |
 | GP2 | S3 | left line sensor (IR, input) |
 | GP3 | | |
 | GP4 | S3 | centre line sensor (IR, input) |
 | GP5 | | |
-| GP6 | | |
-| GP7 | | |
-| GP8 | | |
-| GP9 | | |
-| GP10 | | |
-| GP11 | | |
-| GP12 | | |
+| GP6 | S2 | left wheel encoder input |
+| GP7 | S2 | right wheel encoder input |
+| GP8 | S2 | left motor PWM A |
+| GP9 | S2 | left motor PWM B |
+| GP10 | S2 | right motor PWM A |
+| GP11 | S2 | right motor PWM B |
+| GP12 | S5 | servo PWM |
 | GP13 | | |
 | GP14 | | |
 | GP15 | | |
@@ -71,8 +72,8 @@ fixed.
 | GP20 | | |
 | GP21 | | |
 | GP22 | | |
-| GP26 | | (ADC0 capable) |
-| GP27 | | (ADC1 capable) |
+| GP26 | S4 | I2C1 SDA (ADC0 capable) |
+| GP27 | S4 | I2C1 SCL (ADC1 capable) |
 | GP28 | | (ADC2 capable) |
 
 ## 3. Peripherals
@@ -107,11 +108,13 @@ the drivers have no locking to stop it.
 |---|---|---|---|
 | UART1 | | | |
 | I2C0 | | | |
-| I2C1 | | | |
+| I2C1 | S4 | `imu_task` (driver `subsystem4/drv_i2c1.c`; kernel I2C driver stays OFF) | GP26/GP27 |
 | SPI0 | | | |
 | SPI1 | | | |
-| ADC | | | GP26–GP28 |
-| PWM slices (list) | | | |
+| ADC | | | GP28 only (GP26/GP27 are I2C1: never set `DEVCONF_ADC_PIN_INIT_0/1`) |
+| PWM slice 4, slice 5 | S2 | `motion_task` | GP8/GP9, GP10/GP11 |
+| PWM slice 6 | S5 | `ultrasonic_task` | GP12 |
+| IO_IRQ_BANK0 (GPIO interrupt, core 0) | S2 | `motion_task` (handler in `motion.c`; route any other GPIO IRQ through it) | GP6/GP7 rising edges |
 | WiFi radio, TCP/IP, MQTT | *kernel* | `cyw43_utk_task` (built in) | GP23–25, GP29 |
 
 ### WiFi and MQTT are special
@@ -147,10 +150,11 @@ change it only by team agreement. Write down every task you create.
 | Subsystem | Priority band | Tasks (name – priority – core) |
 |---|---|---|
 | 1 | 12–13 | *example:* led_task – 12 – any |
-| 2 | 14–15 | |
+| 2 | 14–15 | motion_task – 14 – core 0 |
 | 3 | 16–17 | barcode_task – 16 – core 1 (polls without sleeping) |
-| 4 | 18–19 | |
-| 5 | 20–21 | |
+| 4 | 18–19 | imu_task – 18 – core 0 |
+| 5 | 20–21 | ultrasonic_task – 20 – core 0 |
+| team | 11 | vehicle_ctrl – 11 – core 0 |
 
 Core: `TP_PRC1` = core 0, `TP_PRC2` = core 1, or "any".
 
@@ -162,12 +166,12 @@ sends to it or waits on it. Agree on the data format before coding.
 
 | ID | From → To | Mechanism | Object ID name | Data / meaning | Agreed by |
 |---|---|---|---|---|---|
-| IF-01 | S3 → any | message buffer (owned by S3) | `mbf_barcode` | 1 byte per decoded Code 39 character ('A'–'Z'); receive with `tk_rcv_mbf` | |
-| IF-02 | | | | | |
-| IF-03 | | | | | |
-| IF-04 | | | | | |
-| IF-05 | | | | | |
-| IF-06 | | | | | |
+| IF-01 | S3 → VC | message buffer (owned by S3) | `mbf_barcode` | 1 byte per decoded Code 39 character ('A'–'Z'); receive with `tk_rcv_mbf` | |
+| IF-02 | S5 → VC | message buffer (owned by S5) | `mbf_s5_events` | one `subsystem5_event_t` per STOP_REQUIRED / PROFILE_READY / FAULT; the VC must keep draining it | |
+| IF-03 | VC → S2 | function API (`motion.h`) | — | `b2_stop()`, `b2_submit_command()`, `b2_get_status()`; lock-protected, any task/core | |
+| IF-04 | S4 → S2 | function call | — | `b2_emergency_brake()` on impact or IMU fault (latched until `b2_authorized_reset_while_stopped()`) | |
+| IF-05 | S2 → S4 | function call | — | `imu_task` reads `b2_get_status()` odometry and feeds `b4_update_travel_mm()` | |
+| IF-06 | VC → S5 | function call | — | `subsystem5_confirm_robot_stopped()` once the encoders are quiet for 100 ms | |
 
 Each interface is tested by at least one integration test
 (`testing/integration/TEST_LOG.md`).
@@ -179,12 +183,12 @@ limit there. The numbers below are the example's usage.
 
 | Object | Limit | S1 | S2 | S3 | S4 | S5 |
 |---|---|---|---|---|---|---|
-| Task | 32 | 1 | | 1 | | |
+| Task | 32 | 1 | 1 | 1 | 1 | 1 (+1 vehicle_ctrl) |
 | Semaphore | 16 | | | | | |
 | Event flag | 16 | | | | | |
 | Mailbox | 12 | | | | | |
-| Mutex | 12 | | | 1 | | |
-| Message buffer | 12 | | | 1 | | |
+| Mutex | 12 | | | 1 | | 1 |
+| Message buffer | 12 | | | 1 | | 1 |
 | Fixed memory pool | 12 | | | | | |
 | Variable memory pool | 12 | | | | | |
 | Cyclic handler | 12 | 1 | | | | |

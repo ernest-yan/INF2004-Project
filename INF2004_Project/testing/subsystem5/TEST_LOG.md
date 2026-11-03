@@ -10,7 +10,7 @@ Define a test here before running it. Test IDs never change.
 
 | ID | What is tested | Requirement / interface | Method | Steps / how | Expected result |
 |---|---|---|---|---|---|
-| S5-U01 | example: runs in a task context | | auto | `subsystem5_test.c` | `[TEST] S5-U01 PASS` |
+| S5-U01 | example: runs in a task context | | auto | `test.c` | `[TEST] S5-U01 PASS` |
 | S5-U02 | | | manual | 1. … 2. … | |
 
 *Method:* **auto** = `TEST_CHECK` in code, result printed on the console;

@@ -1,7 +1,7 @@
 /* PORT: <stddef.h>/<string.h> removed (they clash with the kernel's size_t).
  * This file is now fully self-contained: it needs only its own header, and a
  * plain 0 is used where NULL was (NULL is not available without those headers). */
-#include "subsystem5_profile.h"
+#include "profile.h"
 
 #include <stdbool.h>
 

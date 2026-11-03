@@ -11,7 +11,8 @@
  *   - interrupt masking replaced by a kernel mutex
  *   - <stddef.h>/<string.h> not used (size_t clash with the kernel headers)
  */
-#include "subsystem5_ultrasonic.h"
+#include "ultrasonic.h"
+#include "../app_hw.h"
 
 /* PORT: replaces time_us_32().  RP2040 TIMER counts microseconds; TIMERAWL
  * (offset 0x28) is a non-latching read of the low 32 bits. */
@@ -191,7 +192,7 @@ static void subsystem5_fault(subsystem5_fault_t fault)
     subsystem5_send_event(subsystem5_EVENT_FAULT, fault);
 }
 
-/* PORT: replaces the GPIO edge interrupt.  Polls GP5 with 1 us time stamps
+/* PORT: replaces the GPIO edge interrupt.  Polls the configured ECHO GPIO with 1 us time stamps
  * until the echo pulse has risen and fallen, or the timeout passes.  Same
  * state machine as the old subsystem5_echo_gpio_irq(), driven by the pin
  * level instead of edge events. */
@@ -615,7 +616,12 @@ int subsystem5_ultrasonic_init(subsystem5_event_publish_fn publish, void *contex
     s_echo_rise_us = 0U;
     s_echo_pulse_us = 0U;
 
-    /* PORT: PWM through libbsp + one direct write for the clock divider. */
+    /* PORT: PWM through libbsp + one direct write for the clock divider.
+     * INTEGRATION FIX: the kernel does not take the PWM block out of reset
+     * (USE_PTMR = 0), so without this every PWM register write was ignored
+     * and the servo never moved.  Release only -- never reset it, because
+     * S2's motor PWM shares the block. */
+    app_release_reset(RESETS_RESET_PWM);
     (void)pwm_set_pin(subsystem5_SERVO_GPIO);
     subsystem5_PWM_CH_DIV = subsystem5_PWM_DIV_1MHZ;
     (void)pwm_set_wrap(subsystem5_SERVO_GPIO, subsystem5_SERVO_PERIOD_US - 1U);
@@ -668,10 +674,10 @@ void subsystem5_get_status(subsystem5_status_t *result)
 
 /* =====================================================================
  *  Subsystem 5 glue (called from app_program/app_main.c)
- *  -- merged in from subsystem5.c / subsystem5_tkernel_adapter.c
+ *  -- merged in from subsystem5.c / the old tkernel adapter
  * ===================================================================== */
 
-EXPORT ID	mbf_s5_events;	/* IF-02, see subsystem5_ultrasonic.h */
+EXPORT ID	mbf_s5_events;	/* IF-02, see ultrasonic.h */
 
 /* The single task that owns GP0/GP1 (ultrasonic) and GP12 (servo). */
 static void subsystem5_task(INT stacd, void *exinf)
