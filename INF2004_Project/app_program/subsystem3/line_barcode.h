@@ -34,7 +34,7 @@
  */
 #define MAX_BARS       60
 #define TIMEOUT_US     50000u
-#define MIN_EDGE_US    250u
+#define MIN_EDGE_US    100u
 #define DECODE_COOLDOWN_US 300000u
 
 #define FAULT_NONE      0x00

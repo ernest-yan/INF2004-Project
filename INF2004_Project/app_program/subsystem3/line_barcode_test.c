@@ -17,6 +17,11 @@
    Set to 0 to skip that test (e.g. when no barcode is available). */
 #define S3_TEST_SCAN_MS		10000
 
+/* S3-M02 live line-sensor diagnostic. These values are kernel ticks.
+   With a 1 ms system tick, 100 samples x 100 ticks is about 10 seconds. */
+#define S3_TEST_LINE_SAMPLES	100
+#define S3_TEST_LINE_DELAY	100
+
 EXPORT void subsystem3_test(void)
 {
 	LineBarcodeData_t d;
@@ -63,6 +68,41 @@ EXPORT void subsystem3_test(void)
 		   "mbf_barcode (IF-01) is valid");
 
 #if S3_TEST_SCAN_MS > 0
+	/* S3-M02: live GP2/GP4 line-tracking diagnostic.
+	   Move the left and centre sensors between white and black areas.
+	   This reads the task's shared snapshot; it does not access GPIO
+	   directly and does not alter the production driver. */
+	{
+		uint8_t last_left = 0xFFu;
+		uint8_t last_center = 0xFFu;
+		uint8_t last_line = 0xFFu;
+		uint8_t last_junction = 0xFFu;
+		int i;
+
+		tm_printf((UB*)"[TEST] S3-M02: MOVE GP2/GP4 OVER BLACK AND WHITE (%d samples)\n",
+			  S3_TEST_LINE_SAMPLES);
+
+		for (i = 0; i < S3_TEST_LINE_SAMPLES; ++i) {
+			d = get_line_barcode_data_safe();
+			if (d.ir_left_raw != last_left ||
+			    d.ir_center_raw != last_center ||
+			    d.line_detected != last_line ||
+			    d.cross_junction != last_junction) {
+				tm_printf((UB*)"[S3-LINE] GP2 Left=%u | GP4 Centre=%u | Line=%u | Junction=%u | Fault=0x%02X\n",
+					  (unsigned)d.ir_left_raw,
+					  (unsigned)d.ir_center_raw,
+					  (unsigned)d.line_detected,
+					  (unsigned)d.cross_junction,
+					  (unsigned)d.fault_mask);
+				last_left = d.ir_left_raw;
+				last_center = d.ir_center_raw;
+				last_line = d.line_detected;
+				last_junction = d.cross_junction;
+			}
+			tk_dly_tsk(S3_TEST_LINE_DELAY);
+		}
+	}
+
 	/* S3-M01: needs a person.  Pass a printed Code 39 barcode (A-Z) in
 	   front of the right sensor (GP16) when the message appears. */
 	{
