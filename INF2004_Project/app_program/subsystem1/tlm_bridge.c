@@ -15,12 +15,10 @@
  */
 
 #include "../app.h"
+#include "../app_hw.h"
 #include "s1_internal.h"
-#include "team_interfaces.h"
 #include "tlm_bridge.h"
 #include "tlm_codec.h"
-
-IMPORT uint64_t time_us_64(void);	/* pico-sdk timer, always running */
 
 /* State: written only by the WiFi service task (single writer). */
 LOCAL volatile UH	g_session;	/* 0 = offline: reject everything */
@@ -34,7 +32,7 @@ LOCAL UB		g_rx[TLM_MBF_MSG_MAX];	/* scratch for one frame */
 /* A new random-looking, non-zero session number, different from the last. */
 LOCAL UH new_session(UH old)
 {
-	uint64_t t = time_us_64();
+	uint64_t t = app_time_us_64();
 	UH	 s = (UH)((t ^ (t >> 16) ^ (t >> 32)) & 0xFFFFu);
 
 	if ((s == 0u) || (s == old)) {
@@ -112,7 +110,7 @@ const char *tlm_bridge_topic(uint8_t topic_id, uint8_t *p_qos, uint8_t *p_retain
 uint16_t tlm_bridge_handle_cmd(const uint8_t *p_data, uint16_t len,
 			       uint8_t *p_ack, uint16_t cap)
 {
-	uint64_t	t0 = time_us_64();
+	uint64_t	t0 = app_time_us_64();
 	tlm_cmd_t	cmd;
 	tlm_result_t	res;
 	UH		last = g_last_seq;
@@ -120,22 +118,19 @@ uint16_t tlm_bridge_handle_cmd(const uint8_t *p_data, uint16_t len,
 	res = tlm_cmd_validate(p_data, len, g_session, &last, &cmd);
 
 	if (res == TLM_RES_ACCEPTED) {
-		g_last_seq = last;
-		if (cmd.code == (uint8_t)TLM_CMD_ESTOP) {
-			/* Urgent path: never waits behind queued events. */
-			safety_raise_estop((uint8_t)EVT_SRC_REMOTE, (uint32_t)t0);
-		} else {
-			vehicle_event_t evt;
+		S1_CMD	q;
 
-			evt.type    = (cmd.code == (uint8_t)TLM_CMD_START)?
-				      (uint8_t)VEH_EVT_START: (uint8_t)VEH_EVT_STOP;
-			evt.source  = (uint8_t)EVT_SRC_REMOTE;
-			evt.arg     = cmd.seq;
-			evt.t_rx_us = (uint32_t)t0;
-			if (!vehicle_post_event(&evt)) {
-				res = TLM_RES_QUEUE_FULL;	/* reported, never hidden */
-				g_stats.queue_full++;
-			}
+		g_last_seq = last;
+		/* Never call other subsystems from here: some of them lock a
+		   mutex. Queue it (no waiting) and wake our task to act on it. */
+		q.code    = cmd.code;
+		q.seq     = cmd.seq;
+		q.t_rx_us = (UW)t0;
+		if (tk_snd_mbf(s1_mbf_cmd, &q, (INT)sizeof(q), TMO_POL) != E_OK) {
+			res = TLM_RES_QUEUE_FULL;	/* reported, never hidden */
+			g_stats.queue_full++;
+		} else {
+			tk_wup_tsk(s1_tid_tlm);
 		}
 	}
 
@@ -144,7 +139,7 @@ uint16_t tlm_bridge_handle_cmd(const uint8_t *p_data, uint16_t len,
 	} else {
 		g_stats.cmds_rejected++;
 	}
-	g_stats.last_cmd_us = (UW)(time_us_64() - t0);
+	g_stats.last_cmd_us = (UW)(app_time_us_64() - t0);
 
 	tm_printf((UB*)"tlm: cmd code=%d seq=%d -> result=%d (%d us)\n",
 		  (int)cmd.code, (int)cmd.seq, (int)res, (int)g_stats.last_cmd_us);

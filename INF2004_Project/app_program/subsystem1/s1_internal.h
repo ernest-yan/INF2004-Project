@@ -15,6 +15,19 @@
  * Created in subsystem1_init(). Read only by tlm_bridge.c. */
 IMPORT ID s1_mbf_out;
 
+/* Accepted commands: WiFi service task -> telemetry task.
+ * The WiFi task must never wait, so it only queues the command (TMO_POL)
+ * and wakes our task; our task then calls the other subsystems.
+ * Created in subsystem1_init(). */
+typedef struct {
+	UB	code;			/* tlm_cmd_code_t */
+	UH	seq;
+	UW	t_rx_us;		/* when the WiFi task received it */
+} S1_CMD;
+
+IMPORT ID s1_mbf_cmd;
+IMPORT ID s1_tid_tlm;			/* our telemetry task, for tk_wup_tsk */
+
 /* Counters kept by the bridge (written only by the WiFi service task,
  * read by our telemetry task for the heartbeat). */
 typedef struct {

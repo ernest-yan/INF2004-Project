@@ -43,6 +43,7 @@
 #define TLM_MBF_MSG_MAX         (TLM_FRAME_MAX + 1u)  /* + topic ID byte */
 #define TLM_MBF_BYTES           (2048u) /* outgoing message buffer size */
 #define TLM_CMD_MAX             (16u)   /* commands are 5 bytes */
+#define TLM_CMD_QUEUE_LEN       (4u)    /* accepted commands waiting for our task */
 #define TLM_WILL_MAX            (16u)
 
 /* 1 = publish STATUS as JSON (readable "before" for the Minimum-Bit
