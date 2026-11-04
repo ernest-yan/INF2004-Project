@@ -66,7 +66,11 @@ bench tests listed in `testing/`.
 `vehicle_ctrl` is a **safe** controller: it only ever stops the robot. Line
 following and barcode turns are now in `subsystem3/line_barcode.c`, and the
 obstacle bypass is in `subsystem5/ultrasonic.c` (`APP_MISSION_ENABLE` in
-`app.h`). Not written yet:
-- receiving the letter -> movement mapping over MQTT (subsystem 1): call
-  `set_mqtt_action_mapping()`, then set `S3_BENCH_MAPPING` to 0,
-- an operator reset path for a latched S2 brake / S4 impact (reset the Pico).
+`app.h`). Added since by subsystem 1 (awaiting team review, see `TEAM.md`
+IF-15 to IF-18):
+- the letter -> movement mapping over MQTT (dashboard `map FULR`) calls
+  `set_mqtt_action_mapping()`; `S3_BENCH_MAPPING` is now 0,
+- remote RESET, the operator reset path for a latched S2 brake / S4 impact /
+  S5 fault (refused while the wheels move),
+- remote START / STOP: the robot now waits for START before line following
+  (`s1_mission_go()` in S3's `line_follow_allowed()`).

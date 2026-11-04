@@ -74,8 +74,7 @@ LOCAL BOOL wheels_driven(const b2_status_t *p_m)
 }
 
 /* START sets the "go" flag; STOP clears it and stops the wheels.
- * Until S3's line_follow_task checks s1_mission_go(), S3 keeps driving
- * on its own, so STOP only holds the wheels for one S3 cycle. */
+ * S3's line_follow_allowed() checks the flag, so it stays stopped. */
 bool vehicle_post_event(const vehicle_event_t *p_evt)
 {
 	vehicle_status_t	v;
@@ -229,6 +228,21 @@ void motion_get_status(motion_status_t *p_out)
 	p_out->distance_mm  = (mean_mm > 0)? (uint32_t)mean_mm: 0u;
 }
 
+/* A decoded letter -> what it means under the current mapping (S3's). */
+LOCAL uint8_t barcode_cmd(char c)
+{
+	if (c == '\0') {
+		return (uint8_t)BARCODE_NONE;
+	}
+	switch (get_action_for_character(c)) {
+	case MOVE_FORWARD:	return (uint8_t)BARCODE_STRAIGHT;
+	case MOVE_LEFT:		return (uint8_t)BARCODE_LEFT;
+	case MOVE_RIGHT:	return (uint8_t)BARCODE_RIGHT;
+	case MOVE_UTURN:	return (uint8_t)BARCODE_UTURN;
+	default:		return (uint8_t)BARCODE_INVALID;	/* not mapped */
+	}
+}
+
 void line_get_status(line_status_t *p_out)
 {
 	LineBarcodeData_t	d = get_line_barcode_data_safe();
@@ -236,12 +250,10 @@ void line_get_status(line_status_t *p_out)
 	/* Sensors are active-high (1 = on the line). */
 	p_out->line_state = (uint8_t)((d.ir_left_raw << 1) | d.ir_center_raw);
 
-	/* TODO(Buddy 3): S3 keeps a decoded letter for only one poll (a few
-	 * microseconds) and its queue belongs to line_follow_task, so we
-	 * cannot see barcodes reliably. Needs a counter + last letter in
-	 * LineBarcodeData_t. Until then: no barcode events. */
-	p_out->last_barcode  = (uint8_t)BARCODE_NONE;
-	p_out->barcode_count = 0u;
+	/* S3's counter (not scanned_char, which lasts one poll, and not
+	 * mbf_barcode, which belongs to line_follow_task). */
+	p_out->barcode_count = d.barcode_count;
+	p_out->last_barcode  = barcode_cmd(d.last_char);
 }
 
 void imu_get_status(imu_status_t *p_out)
