@@ -12,14 +12,21 @@
  *	      --> s1_mbf_out (message buffer, owned by us) -->
  *	  cyw43_utk_task (kernel's WiFi task) runs mqtt_utk.c, which calls
  *	      tlm_bridge.c to empty s1_mbf_out (TMO_POL) and publishes.
- *	  Commands come back the other way: mqtt_utk.c -> tlm_bridge.c ->
- *	      VehicleController (queue) or the E-STOP event flag.
+ *	  Commands come back the other way: mqtt_utk.c -> tlm_bridge.c
+ *	      --> s1_mbf_cmd (owned by us) + tk_wup_tsk --> s1_telemetry_task,
+ *	      which acts on them (team_adapters.c). The WiFi task never waits.
  */
 
 #include "subsystem1.h"
 #include "s1_internal.h"
 
 EXPORT ID s1_mbf_out;
+EXPORT ID s1_mbf_cmd;
+EXPORT ID s1_tid_tlm;
+
+/* The kernel stores each message as a 4-byte header + its size rounded
+   up to 4 bytes (kernel/tkernel/messagebuf.h). */
+#define CMD_SLOT_BYTES	(sizeof(INT) + ((sizeof(S1_CMD) + 3u) & ~3u))
 
 EXPORT ER subsystem1_init(void)
 {
@@ -31,6 +38,13 @@ EXPORT ER subsystem1_init(void)
 	s1_mbf_out = tk_cre_mbf(&cmbf);
 	if (s1_mbf_out < E_OK) {
 		return s1_mbf_out;
+	}
+
+	cmbf.bufsz  = (SZ)(TLM_CMD_QUEUE_LEN * CMD_SLOT_BYTES);
+	cmbf.maxmsz = (INT)sizeof(S1_CMD);
+	s1_mbf_cmd = tk_cre_mbf(&cmbf);
+	if (s1_mbf_cmd < E_OK) {
+		return s1_mbf_cmd;
 	}
 	return E_OK;
 }
@@ -46,13 +60,20 @@ EXPORT ER subsystem1_start(void)
 	ctsk.task    = (FP)s1_telemetry_task;
 	ctsk.itskpri = S1_PRI_TLM;
 	ctsk.stksz   = S1_TLM_STACK;
-	ctsk.tskatr  = TA_HLNG | TA_RNG3;	/* any core */
+	ctsk.tskatr  = TA_HLNG | TA_RNG3;
+#if TK_SUPPORT_SMP
+	/* Core 0 only: core 1 belongs to S3's barcode task, which times bars
+	   in microseconds and is mis-measured if we preempt it. */
+	ctsk.tskatr |= TA_ASSPRC;
+	ctsk.assprc  = TP_PRC1;
+#endif
 
 	tid = tk_cre_tsk(&ctsk);
 	if (tid < E_OK) {
 		CHECK(tid, "telemetry");
 		return tid;
 	}
+	s1_tid_tlm = tid;
 	er = tk_sta_tsk(tid, 0);
 	CHECK(er, "telemetry");
 	return er;

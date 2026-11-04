@@ -1,13 +1,12 @@
 /**
  * @file    team_interfaces.h
- * @brief   PROPOSED contract between Telemetry (S1) and the other subsystems.
+ * @brief   What Telemetry (S1) needs from the other subsystems.
  *
- * Telemetry only CALLS these. Each function is owned (implemented) by the
- * buddy named beside it, in THEIR subsystem folder. Until the real code
- * exists, team_stubs.c (in our folder) provides fake versions marked
- * "weak", so the real ones replace them automatically once they are added.
- * Agree names, fields and units with the team and record them in TEAM.md
- * section 5 (interfaces) before freezing.
+ * Telemetry only CALLS these. They are implemented in OUR folder by
+ * team_adapters.c, which reads each buddy's real public getter
+ * (b2_get_status, get_line_barcode_data_safe, b4_get_status,
+ * subsystem5_get_status) and converts it. Call them only from our
+ * telemetry task: some of those getters lock a mutex.
  *
  * Plain C types only (stdint/stdbool): safe next to tk/tkernel.h.
  */
@@ -49,15 +48,19 @@ typedef struct
     uint8_t state;       /* vehicle_state_t */
     bool    b_estop_latched;
     uint8_t estop_source; /* event_source_t of the latched E-STOP */
-    uint8_t fault_mask;   /* one bit per subsystem fault */
+    uint8_t fault_mask;   /* TLM_FAULT_Sn: bit n = subsystem n has a fault */
 } vehicle_status_t;
 
-/* Non-blocking (tk_snd_mbf with TMO_POL). Returns false if qVehicleEvent
- * is full. Called from the WiFi service task, so it must never wait. */
+#define TLM_FAULT_S2    (1u << 2)
+#define TLM_FAULT_S3    (1u << 3)
+#define TLM_FAULT_S4    (1u << 4)
+#define TLM_FAULT_S5    (1u << 5)
+
+/* Remote START / STOP. PENDING TEAM DECISION: only logged for now.
+ * Returns false if the command could not be handed over. */
 bool vehicle_post_event(const vehicle_event_t *p_evt);
 
-/* Urgent path, NOT through qVehicleEvent. Latches E-STOP and wakes the
- * brake path immediately (tk_set_flg). Never blocks. Safe from any task. */
+/* Remote E-STOP. PENDING TEAM DECISION: not wired to the brakes yet. */
 void safety_raise_estop(uint8_t source, uint32_t t_rx_us);
 
 void vehicle_get_status(vehicle_status_t *p_out);
@@ -77,7 +80,7 @@ void motion_get_status(motion_status_t *p_out);
 /* ---------- LineBarcode (Buddy 3) ----------
  * Buddy 3 uses digital IR sensors: left + centre follow the line, right
  * reads barcodes. Their getter is get_line_barcode_data_safe(), so our
- * s1_line_adapter.c (Stage 10) provides line_get_status() from it.
+ * team_adapters.c provides line_get_status() from it.
  */
 typedef enum
 {
@@ -122,7 +125,7 @@ typedef struct
     uint8_t  width_cm;
     uint16_t clear_l_cm;
     uint16_t clear_r_cm;
-    uint8_t  decision;        /* stop/continue/left/right/reverse */
+    uint8_t  decision;        /* S5 candidate side: 0 none, 1 left, 2 right */
 } ultra_status_t;
 
 void ultra_get_status(ultra_status_t *p_out);

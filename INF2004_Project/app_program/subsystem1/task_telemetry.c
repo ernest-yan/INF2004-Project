@@ -7,6 +7,7 @@
  *	Every 1 s:    pack one HEARTBEAT frame.
  *	On a change:  pack an EVENT frame (barcode, hump peak, obstacle,
  *	              impact, state change, E-STOP).
+ *	On a command: act on what the WiFi task queued in s1_mbf_cmd.
  *
  *	It never touches WiFi/lwIP/MQTT: the WiFi service task empties the
  *	message buffer (tlm_bridge.c + mqtt_utk.c). It never waits on the
@@ -181,6 +182,28 @@ LOCAL void send_status(UH session)
 	g_prev_valid = TRUE;
 }
 
+/* Act on the commands the WiFi task accepted (s1_mbf_cmd). Runs here,
+ * not in the WiFi task, so the calls below may lock other subsystems. */
+LOCAL void run_commands(void)
+{
+	S1_CMD	q;
+
+	while (tk_rcv_mbf(s1_mbf_cmd, &q, TMO_POL) == (INT)sizeof(q)) {
+		if (q.code == (UB)TLM_CMD_ESTOP) {
+			safety_raise_estop((uint8_t)EVT_SRC_REMOTE, q.t_rx_us);
+		} else {
+			vehicle_event_t evt;
+
+			evt.type    = (q.code == (UB)TLM_CMD_START)?
+				      (uint8_t)VEH_EVT_START: (uint8_t)VEH_EVT_STOP;
+			evt.source  = (uint8_t)EVT_SRC_REMOTE;
+			evt.arg     = q.seq;
+			evt.t_rx_us = q.t_rx_us;
+			(void)vehicle_post_event(&evt);
+		}
+	}
+}
+
 LOCAL void send_heartbeat(UH session, UW now)
 {
 	S1_STATS	st;
@@ -217,6 +240,7 @@ EXPORT void s1_telemetry_task(INT stacd, void *exinf)
 		UW	now     = now_ms();
 		UH	session = tlm_bridge_session();
 
+		run_commands();
 		if (session == 0u) {
 			g_prev_valid = FALSE;	/* offline: nothing to send */
 		} else {
@@ -229,6 +253,8 @@ EXPORT void s1_telemetry_task(INT stacd, void *exinf)
 				send_heartbeat(session, now);
 			}
 		}
-		tk_dly_tsk(TLM_TASK_TICK_MS);
+		/* Sleep one tick, or less if the WiFi task wakes us with a
+		   command (tk_wup_tsk in tlm_bridge.c). */
+		tk_slp_tsk(TLM_TASK_TICK_MS);
 	}
 }
