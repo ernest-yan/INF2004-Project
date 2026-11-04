@@ -52,6 +52,8 @@ typedef enum {
 /*
  * Compact public data structure from the original project.
  * scanned_char is set for ONE process call when a new character is decoded.
+ * S1: barcode_count / last_char keep it for readers that poll slowly
+ * (S1 telemetry at 5 Hz), without taking it from mbf_barcode.
  */
 typedef struct __attribute__((packed)) {
     uint8_t line_detected  : 1;
@@ -62,6 +64,8 @@ typedef struct __attribute__((packed)) {
     uint8_t reserved       : 3;
     char scanned_char;
     uint8_t fault_mask;
+    uint16_t barcode_count; /* S1: +1 per decoded character, wraps */
+    char last_char;         /* S1: newest decoded character, '\0' = none yet */
 } LineBarcodeData_t;
 
 /* Create the kernel mutex that protects the shared data.  Call ONCE from
@@ -110,11 +114,12 @@ MovementAction_t get_action_for_character(char c);
 
 /*
  * The real letter -> movement mapping arrives over MQTT at the demo through
- * set_mqtt_action_mapping() (subsystem 1).  Until that exists this bench
- * mapping lets the turns be tested.  MQTT replaces it as soon as it arrives.
- * Set to 0 once subsystem 1 is in: the mapping must not be hard-coded.
+ * set_mqtt_action_mapping() (subsystem 1, dashboard "map FULR").  Until it
+ * arrives every barcode means MOVE_NONE (go straight on).
+ * 1 = hard-code the bench mapping below at boot (bench tests without WiFi
+ * only; MQTT still replaces it).  The demo must use 0.
  */
-#define S3_BENCH_MAPPING	1
+#define S3_BENCH_MAPPING	0
 #define S3_BENCH_FORWARD	'F'
 #define S3_BENCH_UTURN		'U'
 #define S3_BENCH_LEFT		'L'
