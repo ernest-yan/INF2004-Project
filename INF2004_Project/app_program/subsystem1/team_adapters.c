@@ -39,7 +39,7 @@
 #define NO_ECHO_CM		0x1FFu		/* 9-bit max: no valid reading */
 
 /* Remote command state: written only by our telemetry task. */
-LOCAL volatile BOOL	g_go;		/* s1_mission_go() */
+LOCAL volatile BOOL	g_go = S1_GO_AT_POWER_ON;	/* s1_mission_go() */
 LOCAL BOOL		g_remote_estop;	/* remote E-STOP latched until RESET */
 
 /* Rising-edge counters for the telemetry EVENT frames. */

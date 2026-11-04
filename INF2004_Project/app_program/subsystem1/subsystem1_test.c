@@ -112,8 +112,8 @@ EXPORT void subsystem1_test(void)
 		TEST_CHECK("S1-U21", tlm_cmd_validate(buf, TLM_CMD_MAP_LEN, sess, &last, &out)
 			   == TLM_RES_BAD_CMD, "MAP with a repeated letter rejected");
 	}
-	TEST_CHECK("S1-U22", s1_mission_go() == FALSE,
-		   "no START at power-on: mission go flag is off");
+	TEST_CHECK("S1-U22", s1_mission_go() == S1_GO_AT_POWER_ON,
+		   "mission go flag at power-on: off with MQTT, on without");
 
 	/* --- frame sizes (Minimum-Bit) ----------------------------------- */
 	s.speed_r_mm_s = 5000u;			/* too big: must clamp, not overflow */

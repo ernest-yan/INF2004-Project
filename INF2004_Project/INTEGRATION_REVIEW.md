@@ -72,5 +72,6 @@ IF-15 to IF-18):
   `set_mqtt_action_mapping()`; `S3_BENCH_MAPPING` is now 0,
 - remote RESET, the operator reset path for a latched S2 brake / S4 impact /
   S5 fault (refused while the wheels move),
-- remote START / STOP: the robot now waits for START before line following
-  (`s1_mission_go()` in S3's `line_follow_allowed()`).
+- remote START / STOP: in `MQTT=1` images the robot now waits for START
+  before line following (`s1_mission_go()` in S3's `line_follow_allowed()`).
+  Images without MQTT drive on their own as before.
