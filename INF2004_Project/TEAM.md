@@ -17,7 +17,7 @@ subsystem, ask its owner or open a pull request for them to review.
 
 | # | Subsystem (what it does) | Student ID | GitHub username | Code | Tests |
 |---|---|---|---|---|---|
-| 1 | *example:* LED heartbeat on GP19 | | | `app_program/subsystem1/` | `testing/subsystem1/` |
+| 1 | WiFi telemetry + remote commands over MQTT (no pins of its own) | 2502568 | caveman37 | `app_program/subsystem1/` | `testing/subsystem1/` |
 | 2 | Motion control: 2 DC motors (PWM) + 2 wheel encoders, speed/distance/turn goals, emergency brake | | | `app_program/subsystem2/` | `testing/subsystem2/` |
 | 3 | Line sensors + Code 39 barcode reader (left/centre IR line sensors, right IR barcode sensor) | | | `app_program/subsystem3/` | `testing/subsystem3/` |
 | 4 | GY-511 (LSM303DLHC) accelerometer: impact detection -> brake, hump-height profile | | | `app_program/subsystem4/` | `testing/subsystem4/` |
@@ -68,7 +68,7 @@ fixed.
 | GP16 | S3 | right barcode sensor (IR, input) |
 | GP17 | | |
 | GP18 | | |
-| GP19 | *example:* S1 | external LED (LED + 330 Ω to GND) |
+| GP19 | | |
 | GP20 | | |
 | GP21 | | |
 | GP22 | | |
@@ -149,7 +149,7 @@ change it only by team agreement. Write down every task you create.
 
 | Subsystem | Priority band | Tasks (name – priority – core) |
 |---|---|---|
-| 1 | 12–13 | *example:* led_task – 12 – any |
+| 1 | 12–13 | s1_telemetry_task – 13 – core 0 (core 1 is S3's barcode task); S1's MQTT code also runs inside the kernel's `cyw43_utk_task` (4) |
 | 2 | 14–15 | motion_task – 14 – core 0 |
 | 3 | 16–17 | barcode_task – 16 – core 1 (polls without sleeping); line_follow_task – 17 – core 0 |
 | 4 | 18–19 | imu_task – 18 – core 0 |
@@ -174,6 +174,12 @@ sends to it or waits on it. Agree on the data format before coding.
 | IF-06 | VC → S5 | function call | — | `subsystem5_confirm_robot_stopped()` once the encoders are quiet for 100 ms | |
 | IF-07 | S5 → S3 | function call | — | `subsystem5_get_status()`: S3 only drives while S5 is in MONITOR with no stop request | |
 | IF-08 | S3 → S5 | function call | — | `get_line_barcode_data_safe()`: the bypass looks for the line on its way back | |
+| IF-09 | S2 → S1 | function call | — | `b2_get_status()`: read-only, 5 Hz, from `s1_telemetry_task` only | |
+| IF-10 | S3 → S1 | function call | — | `get_line_barcode_data_safe()`: read-only, 5 Hz, from `s1_telemetry_task` only (takes S3's mutex, so never from the WiFi task) | |
+| IF-11 | S4 → S1 | function call | — | `b4_get_status()`: read-only, 5 Hz, from `s1_telemetry_task` only | |
+| IF-12 | S5 → S1 | function call | — | `subsystem5_get_status()`: read-only, 5 Hz, from `s1_telemetry_task` only. S1 never reads `mbf_s5_events` (IF-02 belongs to the VC) | |
+| IF-13 | S1 (WiFi task) → S1 (telemetry task) | message buffer (owned by S1) + `tk_wup_tsk` | `s1_mbf_cmd` | one `S1_CMD` per accepted remote command (START / STOP / E-STOP), max 4 queued. **What they do is a team decision: today they are only logged** | |
+| IF-14 | S1 → kernel WiFi task | message buffer (owned by S1) | `s1_mbf_out` | telemetry frames (1 topic-ID byte + payload); emptied with `TMO_POL` by S1's hook in the shared `lib/liblwip/sysdepend/pico_rp2040/mqtt_utk.c` | |
 
 Each interface is tested by at least one integration test
 (`testing/integration/TEST_LOG.md`).
@@ -190,10 +196,10 @@ limit there. The numbers below are the example's usage.
 | Event flag | 16 | | | | | |
 | Mailbox | 12 | | | | | |
 | Mutex | 12 | | | 1 | | 1 |
-| Message buffer | 12 | | | 1 | | 1 |
+| Message buffer | 12 | 2 | | 1 | | 1 |
 | Fixed memory pool | 12 | | | | | |
 | Variable memory pool | 12 | | | | | |
-| Cyclic handler | 12 | 1 | | | | |
+| Cyclic handler | 12 | | | | | |
 | Alarm handler | 12 | | | | | |
 
 (The kernel's USB and WiFi service tasks also use a few of these.)

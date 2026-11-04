@@ -28,6 +28,19 @@ typedef struct {
 IMPORT ID s1_mbf_cmd;
 IMPORT ID s1_tid_tlm;			/* our telemetry task, for tk_wup_tsk */
 
+/* The kernel stores each message as a 4-byte header + its size rounded
+   up to 4 bytes (kernel/tkernel/messagebuf.h). */
+#define S1_CMD_SLOT_BYTES	(sizeof(INT) + ((sizeof(S1_CMD) + 3u) & ~3u))
+
+/* Measurements kept by our telemetry task, read by our tests. */
+typedef struct {
+	UW	loops;			/* times round the task loop */
+	UW	loop_max_us;		/* longest loop, work only (not the sleep) */
+	UW	cores_seen;		/* bit n set = ran on processor n (1 = core 0) */
+} S1_DIAG;
+
+IMPORT void s1_tlm_get_diag(S1_DIAG *p_out);
+
 /* Counters kept by the bridge (written only by the WiFi service task,
  * read by our telemetry task for the heartbeat). */
 typedef struct {
