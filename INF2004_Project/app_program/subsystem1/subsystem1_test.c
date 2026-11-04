@@ -88,6 +88,33 @@ EXPORT void subsystem1_test(void)
 	TEST_CHECK("S1-U08", tlm_cmd_validate(buf, TLM_CMD_LEN, sess, &last, &out)
 		   == TLM_RES_BAD_CMD, "unknown command code rejected");
 
+	/* RESET / MAP: format checks only. Nothing is braked or reset, so
+	   the other subsystems' tests are not disturbed. */
+	(void)make_cmd(TLM_CMD_RESET, sess, 3u, buf);
+	TEST_CHECK("S1-U19", tlm_cmd_validate(buf, TLM_CMD_LEN, sess, &last, &out)
+		   == TLM_RES_ACCEPTED && out.code == TLM_CMD_RESET,
+		   "RESET command accepted");
+	{
+		tlm_cmd_t	m;
+
+		m.code    = TLM_CMD_MAP;
+		m.session = sess;
+		m.seq     = 4u;
+		m.map[0]  = 'F'; m.map[1] = 'U'; m.map[2] = 'L'; m.map[3] = 'R';
+		(void)tlm_encode_cmd(&m, buf, TLM_CMD_MAP_LEN);
+		TEST_CHECK("S1-U20", tlm_cmd_validate(buf, TLM_CMD_MAP_LEN, sess, &last, &out)
+			   == TLM_RES_ACCEPTED && out.map[0] == 'F' && out.map[3] == 'R',
+			   "MAP command accepted, letters kept in order");
+
+		m.seq    = 5u;
+		m.map[1] = 'F';			/* same letter twice */
+		(void)tlm_encode_cmd(&m, buf, TLM_CMD_MAP_LEN);
+		TEST_CHECK("S1-U21", tlm_cmd_validate(buf, TLM_CMD_MAP_LEN, sess, &last, &out)
+			   == TLM_RES_BAD_CMD, "MAP with a repeated letter rejected");
+	}
+	TEST_CHECK("S1-U22", s1_mission_go() == FALSE,
+		   "no START at power-on: mission go flag is off");
+
 	/* --- frame sizes (Minimum-Bit) ----------------------------------- */
 	s.speed_r_mm_s = 5000u;			/* too big: must clamp, not overflow */
 	TEST_CHECK("S1-U09", tlm_encode_status(&s, buf, sizeof(buf)) == TLM_STATUS_LEN,

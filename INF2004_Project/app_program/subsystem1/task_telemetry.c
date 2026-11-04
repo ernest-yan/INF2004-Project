@@ -191,17 +191,26 @@ LOCAL void run_commands(void)
 	S1_CMD	q;
 
 	while (tk_rcv_mbf(s1_mbf_cmd, &q, TMO_POL) == (INT)sizeof(q)) {
-		if (q.code == (UB)TLM_CMD_ESTOP) {
-			safety_raise_estop((uint8_t)EVT_SRC_REMOTE, q.t_rx_us);
-		} else {
-			vehicle_event_t evt;
+		vehicle_event_t evt;
 
+		switch (q.code) {
+		case TLM_CMD_ESTOP:
+			safety_raise_estop((uint8_t)EVT_SRC_REMOTE, q.t_rx_us);
+			break;
+		case TLM_CMD_RESET:
+			(void)safety_reset_while_stopped();
+			break;
+		case TLM_CMD_MAP:
+			barcode_set_mapping(q.map);
+			break;
+		default:			/* START / STOP */
 			evt.type    = (q.code == (UB)TLM_CMD_START)?
 				      (uint8_t)VEH_EVT_START: (uint8_t)VEH_EVT_STOP;
 			evt.source  = (uint8_t)EVT_SRC_REMOTE;
 			evt.arg     = q.seq;
 			evt.t_rx_us = q.t_rx_us;
 			(void)vehicle_post_event(&evt);
+			break;
 		}
 	}
 }

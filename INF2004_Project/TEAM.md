@@ -178,8 +178,12 @@ sends to it or waits on it. Agree on the data format before coding.
 | IF-10 | S3 → S1 | function call | — | `get_line_barcode_data_safe()`: read-only, 5 Hz, from `s1_telemetry_task` only (takes S3's mutex, so never from the WiFi task) | |
 | IF-11 | S4 → S1 | function call | — | `b4_get_status()`: read-only, 5 Hz, from `s1_telemetry_task` only | |
 | IF-12 | S5 → S1 | function call | — | `subsystem5_get_status()`: read-only, 5 Hz, from `s1_telemetry_task` only. S1 never reads `mbf_s5_events` (IF-02 belongs to the VC) | |
-| IF-13 | S1 (WiFi task) → S1 (telemetry task) | message buffer (owned by S1) + `tk_wup_tsk` | `s1_mbf_cmd` | one `S1_CMD` per accepted remote command (START / STOP / E-STOP), max 4 queued. **What they do is a team decision: today they are only logged** | |
+| IF-13 | S1 (WiFi task) → S1 (telemetry task) | message buffer (owned by S1) + `tk_wup_tsk` | `s1_mbf_cmd` | one `S1_CMD` per accepted remote command (START / STOP / E-STOP / RESET / MAP), max 4 queued; carried out by `s1_telemetry_task` (IF-15 to IF-18) | |
 | IF-14 | S1 → kernel WiFi task | message buffer (owned by S1) | `s1_mbf_out` | telemetry frames (1 topic-ID byte + payload); emptied with `TMO_POL` by S1's hook in the shared `lib/liblwip/sysdepend/pico_rp2040/mqtt_utk.c` | |
+| IF-15 | S1 → S2 | function API (`motion.h`) | — | remote E-STOP → `b2_emergency_brake()` (latched); STOP → `b2_stop()`; RESET → `b2_authorized_reset_while_stopped()` (S2 refuses if an encoder ticked in the last 200 ms). From `s1_telemetry_task` only. **Proposed, awaiting team OK** | |
+| IF-16 | S1 → S4, S1 → S5 | function call | — | remote RESET only, and only if the wheels are not being driven: `b4_authorized_reset_while_stopped()` if an impact or fault is latched (S4 then recalibrates), `subsystem5_reset_fault_while_stopped()` if S5 is in FAULT. **Proposed, awaiting team OK** | |
+| IF-17 | S1 → S3 | function call | — | remote MAP (4 letters/digits: forward, U-turn, left, right) → `set_mqtt_action_mapping()`. Replaces the bench mapping; then S3 can set `S3_BENCH_MAPPING` to 0. **Format awaiting Buddy 3's OK** | |
+| IF-18 | S1 → S3 | function call (`subsystem1.h`) | — | `s1_mission_go()`: TRUE after a remote START, FALSE at power-on and after STOP / E-STOP / RESET. **Proposed: S3's `line_follow_task` would check it before driving (not used yet)** | |
 
 Each interface is tested by at least one integration test
 (`testing/integration/TEST_LOG.md`).

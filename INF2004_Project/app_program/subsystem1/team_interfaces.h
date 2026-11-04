@@ -56,12 +56,21 @@ typedef struct
 #define TLM_FAULT_S4    (1u << 4)
 #define TLM_FAULT_S5    (1u << 5)
 
-/* Remote START / STOP. PENDING TEAM DECISION: only logged for now.
- * Returns false if the command could not be handed over. */
+/* Remote START / STOP: set / clear s1_mission_go() (STOP also b2_stop()).
+ * START is refused (false) while the car is in SAFE_STOP. */
 bool vehicle_post_event(const vehicle_event_t *p_evt);
 
-/* Remote E-STOP. PENDING TEAM DECISION: not wired to the brakes yet. */
+/* Remote E-STOP: b2_emergency_brake(), latched until a RESET. */
 void safety_raise_estop(uint8_t source, uint32_t t_rx_us);
+
+/* Remote RESET: clears S2's brake, S4's impact and S5's fault, only if the
+ * wheels are still. Never re-enables driving (needs a new START).
+ * Returns false if refused. */
+bool safety_reset_while_stopped(void);
+
+/* Remote barcode mapping -> S3's set_mqtt_action_mapping().
+ * p_map = forward, U-turn, left, right (already validated). */
+void barcode_set_mapping(const char *p_map);
 
 void vehicle_get_status(vehicle_status_t *p_out);
 

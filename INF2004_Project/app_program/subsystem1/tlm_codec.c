@@ -373,7 +373,42 @@ tlm_encode_cmd(const tlm_cmd_t *p_cmd, uint8_t *p_buf, uint32_t cap)
     bw_put_sat(&w, p_cmd->code, 4u);
     bw_put(&w, p_cmd->session, 16u);
     bw_put(&w, p_cmd->seq, 16u);
+    if (p_cmd->code == (uint8_t) TLM_CMD_MAP)
+    {
+        uint32_t i;
+
+        for (i = 0u; i < TLM_MAP_LETTERS; i++)
+        {
+            bw_put(&w, (uint8_t) p_cmd->map[i], 8u);
+        }
+    }
     return bw_finish(&w);
+}
+
+/* Code 39 letters and digits only, and no letter used twice. */
+static bool
+map_is_valid(const char *p_map)
+{
+    uint32_t i;
+    uint32_t j;
+
+    for (i = 0u; i < TLM_MAP_LETTERS; i++)
+    {
+        char c = p_map[i];
+
+        if (!(((c >= 'A') && (c <= 'Z')) || ((c >= '0') && (c <= '9'))))
+        {
+            return false;
+        }
+        for (j = 0u; j < i; j++)
+        {
+            if (p_map[j] == c)
+            {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 /*
@@ -387,12 +422,18 @@ tlm_cmd_validate(const uint8_t *p_data, uint32_t len, uint16_t current_session,
 {
     tlm_bitreader_t r;
     uint32_t        version;
+    uint32_t        i;
 
     p_out->code    = (uint8_t) TLM_CMD_NONE;
     p_out->session = 0u;
     p_out->seq     = 0u;
+    for (i = 0u; i < TLM_MAP_LETTERS; i++)
+    {
+        p_out->map[i] = '\0';
+    }
 
-    if ((p_data == NULL) || (len != TLM_CMD_LEN))
+    if ((p_data == NULL) ||
+        ((len != TLM_CMD_LEN) && (len != TLM_CMD_MAP_LEN)))
     {
         return TLM_RES_BAD_LEN;
     }
@@ -417,9 +458,25 @@ tlm_cmd_validate(const uint8_t *p_data, uint32_t len, uint16_t current_session,
         return TLM_RES_BAD_SESSION;
     }
     if ((p_out->code < (uint8_t) TLM_CMD_START) ||
-        (p_out->code > (uint8_t) TLM_CMD_ESTOP))
+        (p_out->code > (uint8_t) TLM_CMD_MAP))
     {
         return TLM_RES_BAD_CMD;
+    }
+    /* Only MAP carries the 4 letters, so only MAP may be the long form. */
+    if ((p_out->code == (uint8_t) TLM_CMD_MAP) != (len == TLM_CMD_MAP_LEN))
+    {
+        return TLM_RES_BAD_LEN;
+    }
+    if (p_out->code == (uint8_t) TLM_CMD_MAP)
+    {
+        for (i = 0u; i < TLM_MAP_LETTERS; i++)
+        {
+            p_out->map[i] = (char) br_get(&r, 8u);
+        }
+        if (!map_is_valid(p_out->map))
+        {
+            return TLM_RES_BAD_CMD;
+        }
     }
     if (p_out->seq <= *p_last_seq)
     {

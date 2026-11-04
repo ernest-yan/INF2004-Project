@@ -24,7 +24,7 @@ static int g_failures = 0;
 static uint32_t
 make_cmd(uint8_t code, uint16_t session, uint16_t seq, uint8_t *p_buf)
 {
-    tlm_cmd_t c = { code, session, seq };
+    tlm_cmd_t c = { code, session, seq, { 0 } };
     return tlm_encode_cmd(&c, p_buf, TLM_CMD_LEN);
 }
 
@@ -83,6 +83,69 @@ test_cmd_validation(void)
     CHECK(tlm_cmd_validate(buf, TLM_CMD_LEN, session, &last_seq, &out)
           == TLM_RES_ACCEPTED);
     CHECK(out.code == TLM_CMD_ESTOP && last_seq == 7u);
+}
+
+static uint32_t
+make_map(const char *p_letters, uint16_t session, uint16_t seq, uint8_t *p_buf)
+{
+    tlm_cmd_t c = { TLM_CMD_MAP, session, seq, { 0 } };
+
+    memcpy(c.map, p_letters, TLM_MAP_LETTERS);
+    return tlm_encode_cmd(&c, p_buf, TLM_CMD_MAP_LEN);
+}
+
+static void
+test_reset_and_map(void)
+{
+    uint8_t   buf[TLM_CMD_MAP_LEN];
+    uint16_t  last_seq = 0u;
+    tlm_cmd_t out;
+    const uint16_t session = 0x4A3Bu;
+
+    /* 1. RESET is a normal 5-byte command */
+    make_cmd(TLM_CMD_RESET, session, 1u, buf);
+    CHECK(tlm_cmd_validate(buf, TLM_CMD_LEN, session, &last_seq, &out)
+          == TLM_RES_ACCEPTED);
+    CHECK(out.code == TLM_CMD_RESET);
+
+    /* 2. MAP: 9 bytes, letters come back in order */
+    CHECK(make_map("FULR", session, 2u, buf) == TLM_CMD_MAP_LEN);
+    CHECK(buf[5] == 'F' && buf[8] == 'R');
+    CHECK(tlm_cmd_validate(buf, TLM_CMD_MAP_LEN, session, &last_seq, &out)
+          == TLM_RES_ACCEPTED);
+    CHECK(out.code == TLM_CMD_MAP && memcmp(out.map, "FULR", 4) == 0);
+    CHECK(last_seq == 2u);
+
+    /* 3. digits allowed (Code 39) */
+    make_map("1234", session, 3u, buf);
+    CHECK(tlm_cmd_validate(buf, TLM_CMD_MAP_LEN, session, &last_seq, &out)
+          == TLM_RES_ACCEPTED);
+
+    /* 4. same letter twice, lowercase, or a symbol: BAD_CMD, seq not used */
+    make_map("FFLR", session, 4u, buf);
+    CHECK(tlm_cmd_validate(buf, TLM_CMD_MAP_LEN, session, &last_seq, &out)
+          == TLM_RES_BAD_CMD);
+    make_map("fulr", session, 4u, buf);
+    CHECK(tlm_cmd_validate(buf, TLM_CMD_MAP_LEN, session, &last_seq, &out)
+          == TLM_RES_BAD_CMD);
+    make_map("FU-R", session, 4u, buf);
+    CHECK(tlm_cmd_validate(buf, TLM_CMD_MAP_LEN, session, &last_seq, &out)
+          == TLM_RES_BAD_CMD);
+    CHECK(last_seq == 3u);
+
+    /* 5. MAP cut to 5 bytes, or START padded to 9: BAD_LEN */
+    make_map("FULR", session, 4u, buf);
+    CHECK(tlm_cmd_validate(buf, TLM_CMD_LEN, session, &last_seq, &out)
+          == TLM_RES_BAD_LEN);
+    make_cmd(TLM_CMD_START, session, 4u, buf);
+    CHECK(tlm_cmd_validate(buf, TLM_CMD_MAP_LEN, session, &last_seq, &out)
+          == TLM_RES_BAD_LEN);
+
+    /* 6. MAP from an old session is rejected like any command */
+    make_map("FULR", 0x1111u, 4u, buf);
+    CHECK(tlm_cmd_validate(buf, TLM_CMD_MAP_LEN, session, &last_seq, &out)
+          == TLM_RES_BAD_SESSION);
+    CHECK(last_seq == 3u);
 }
 
 static void
@@ -157,6 +220,7 @@ int
 main(void)
 {
     test_cmd_validation();
+    test_reset_and_map();
     test_status_frame();
     test_other_frames();
 

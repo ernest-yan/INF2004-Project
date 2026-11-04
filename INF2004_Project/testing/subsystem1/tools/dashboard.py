@@ -24,7 +24,8 @@ VERSION = 1
 T_ONLINE, T_STATUS, T_HEARTBEAT = "is33/car/online", "is33/car/status", "is33/car/heartbeat"
 T_EVENT, T_ACK, T_CMD = "is33/car/event", "is33/car/ack", "is33/car/cmd"
 
-CMD = {"start": 1, "stop": 2, "estop": 3}
+CMD = {"start": 1, "stop": 2, "estop": 3, "reset": 4, "map": 5}
+MAP_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
 CMD_NAME = {v: k.upper() for k, v in CMD.items()}
 RESULT = ["ACCEPTED", "BAD_LEN", "BAD_VERSION", "BAD_SESSION", "BAD_CMD",
           "STALE_SEQ", "QUEUE_FULL"]
@@ -122,9 +123,11 @@ def decode_online(data: bytes) -> dict:
     return {"version": ver, "online": bool(online), "session": r.get(16)}
 
 
-def encode_cmd(code: int, session: int, seq: int) -> bytes:
-    """5 bytes: version(4) cmd(4) session(16) seq(16)."""
-    return bytes([(VERSION << 4) | code]) + session.to_bytes(2, "big") + seq.to_bytes(2, "big")
+def encode_cmd(code: int, session: int, seq: int, letters: str = "") -> bytes:
+    """5 bytes: version(4) cmd(4) session(16) seq(16).
+    MAP adds 4 ASCII letters (forward, U-turn, left, right): 9 bytes."""
+    return (bytes([(VERSION << 4) | code]) + session.to_bytes(2, "big")
+            + seq.to_bytes(2, "big") + letters.encode("ascii"))
 
 
 class Dashboard:
@@ -201,26 +204,28 @@ class Dashboard:
             else:
                 print(f"[dash] could not decode {msg.topic}: {exc} ({msg.payload.hex()})")
 
-    def send(self, name: str, session=None, seq=None):
+    def send(self, name: str, session=None, seq=None, letters: str = ""):
         with self.lock:
             session = self.session if session is None else session
             if seq is None:
                 seq = self.next_seq
                 self.next_seq += 1
-        payload = encode_cmd(CMD[name], session, seq)
+        payload = encode_cmd(CMD[name], session, seq, letters)
         self.sent_at[seq] = time.time()
         # Commands are NEVER retained, so the broker never replays them.
         self.client.publish(T_CMD, payload, qos=1, retain=False)
-        self.write_log("sent_cmd", payload, {"cmd": name, "session": session, "seq": seq})
-        print(f"[dash] sent {name.upper()} session=0x{session:04X} seq={seq}")
+        self.write_log("sent_cmd", payload, {"cmd": name, "session": session, "seq": seq,
+                                             "letters": letters})
+        print(f"[dash] sent {name.upper()} {letters} session=0x{session:04X} seq={seq}")
 
     def run(self):
         self.client.connect(self.args.broker, self.args.port, keepalive=30)
         self.client.loop_start()
         if self.args.clear_retained:
             self.client.publish(T_CMD, b"", qos=1, retain=True)  # wipe any retained cmd
-        print("Commands: start | stop | e (E-STOP) | stale (old-session START) | "
-              "replay (repeat last seq) | burst N (N STARTs fast) | q")
+        print("Commands: start | stop | e (E-STOP) | reset | map FULR (forward, U-turn, "
+              "left, right) | stale (old-session START) | replay (repeat last seq) | "
+              "burst N (N STARTs fast) | q")
         try:
             for line in sys.stdin:
                 parts = line.strip().lower().split()
@@ -229,8 +234,15 @@ class Dashboard:
                 cmd = parts[0]
                 if cmd == "q":
                     break
-                elif cmd in ("start", "stop"):
+                elif cmd in ("start", "stop", "reset"):
                     self.send(cmd)
+                elif cmd == "map":
+                    letters = parts[1].upper() if len(parts) > 1 else ""
+                    if (len(letters) != 4 or not set(letters) <= MAP_CHARS
+                            or len(set(letters)) != 4):
+                        print("map needs 4 different letters/digits, e.g. map FULR")
+                    else:
+                        self.send("map", letters=letters)
                 elif cmd in ("e", "estop"):
                     self.send("estop")
                 elif cmd == "stale":

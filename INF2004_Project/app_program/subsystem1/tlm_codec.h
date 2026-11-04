@@ -24,6 +24,8 @@
 #define TLM_ACK_LEN             (7u)    /*  52 bits */
 #define TLM_EVENT_MAX_LEN       (10u)   /*  78 bits, obstacle profile */
 #define TLM_CMD_LEN             (5u)    /*  40 bits */
+#define TLM_CMD_MAP_LEN         (9u)    /*  72 bits: header + 4 letters */
+#define TLM_MAP_LETTERS         (4u)    /* forward, U-turn, left, right */
 
 /* ---------- Commands (dashboard -> car) ---------- */
 typedef enum
@@ -31,7 +33,9 @@ typedef enum
     TLM_CMD_NONE  = 0,
     TLM_CMD_START = 1,
     TLM_CMD_STOP  = 2,
-    TLM_CMD_ESTOP = 3
+    TLM_CMD_ESTOP = 3,
+    TLM_CMD_RESET = 4,  /* clear brake / impact / S5 fault, only when still */
+    TLM_CMD_MAP   = 5   /* barcode letter -> movement mapping (map[]) */
 } tlm_cmd_code_t;
 
 typedef enum
@@ -50,6 +54,8 @@ typedef struct
     uint8_t  code;      /* tlm_cmd_code_t */
     uint16_t session;
     uint16_t seq;
+    char     map[TLM_MAP_LETTERS];  /* TLM_CMD_MAP only: 'A'-'Z' / '0'-'9',
+                                       all different */
 } tlm_cmd_t;
 
 /* ---------- Status frame (car -> dashboard, 5 Hz) ---------- */

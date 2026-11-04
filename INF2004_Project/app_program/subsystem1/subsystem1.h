@@ -21,4 +21,9 @@
 /* Is the car connected to the broker right now? Safe from any task. */
 IMPORT BOOL s1_is_online(void);
 
+/* Has the operator sent START (and no STOP / E-STOP / RESET since)?
+ * For S3's line_follow_task to check before driving. Safe from any
+ * task, either core. FALSE at power-on. */
+IMPORT BOOL s1_mission_go(void);
+
 #endif /* SUBSYSTEM1_H */
