@@ -24,10 +24,6 @@ EXPORT ID s1_mbf_out;
 EXPORT ID s1_mbf_cmd;
 EXPORT ID s1_tid_tlm;
 
-/* The kernel stores each message as a 4-byte header + its size rounded
-   up to 4 bytes (kernel/tkernel/messagebuf.h). */
-#define CMD_SLOT_BYTES	(sizeof(INT) + ((sizeof(S1_CMD) + 3u) & ~3u))
-
 EXPORT ER subsystem1_init(void)
 {
 	T_CMBF	cmbf = {0};
@@ -40,7 +36,7 @@ EXPORT ER subsystem1_init(void)
 		return s1_mbf_out;
 	}
 
-	cmbf.bufsz  = (SZ)(TLM_CMD_QUEUE_LEN * CMD_SLOT_BYTES);
+	cmbf.bufsz  = (SZ)(TLM_CMD_QUEUE_LEN * S1_CMD_SLOT_BYTES);
 	cmbf.maxmsz = (INT)sizeof(S1_CMD);
 	s1_mbf_cmd = tk_cre_mbf(&cmbf);
 	if (s1_mbf_cmd < E_OK) {

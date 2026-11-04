@@ -18,6 +18,11 @@ Define a test here before running it. Test IDs never change.
 | INT-06 | robot follows the line | IF-03 | manual | wheels lifted first, then on the track: normal image, keep still until `[S3] line following armed`, then place on the line | follows the line; `[S3] line lost, stopped` when lifted off it |
 | INT-07 | stored barcode runs at the next cross-junction | IF-01, IF-03 | manual | follow the line over a barcode in each scan direction, then reach a cross-junction; repeat for each of the four movements | `[S3] barcode 'L' stored`, no movement until the junction, then `[S3] junction, barcode 'L' -> action ...` and the matching movement |
 | INT-08 | robot bypasses an obstacle and returns to the line | IF-02, IF-03, IF-07, IF-08 | manual | box on the line, clear space on one side | stops, servo sweeps, `[S5] bypassing on the ...`, `[S5] bypass done, back on the line`, then `[S3] line found, following` |
+| INT-09 | S2 wheel data reaches the dashboard | IF-09 | manual | see S1-M01 | dashboard encoders/speeds match `[VC] S2 ... enc=L/R` |
+| INT-10 | S3 line sensors reach the dashboard | IF-10 | manual | see S1-M02 | dashboard `line` matches `[VC] ... S3 L=… C=…` |
+| INT-11 | S4 pitch reaches the dashboard | IF-11 | manual | see S1-M03 | dashboard `pitch` ≈ `[VC] ... S4 pitch=…cdeg` / 100 |
+| INT-12 | S5 distance reaches the dashboard | IF-12 | manual | see S1-M04 | dashboard `obs_cm` ≈ `[VC] ... S5 front=…` / 10 |
+| INT-13 | telemetry does not slow S2's motor loop | IF-09, priorities | auto + manual | S1-U17 (auto), S1-M06 (5 min) | S2 `deadline_misses` unchanged |
 
 *Method:* **auto** = `TEST_CHECK` in code, result printed on the console;
 **manual** = a person observes the result (LED, scope, meter, phone app…).

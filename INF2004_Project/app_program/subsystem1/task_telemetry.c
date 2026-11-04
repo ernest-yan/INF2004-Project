@@ -16,12 +16,14 @@
  */
 
 #include "subsystem1.h"
+#include "../app_hw.h"
 #include "s1_internal.h"
 #include "team_interfaces.h"
 #include "tlm_codec.h"
 
 #define MS_PER_S	1000u
 
+LOCAL volatile S1_DIAG	g_diag;		/* read by our tests */
 LOCAL UW	g_tx_dropped;		/* frames lost because the buffer was full */
 LOCAL UB	g_seq_status;
 LOCAL UB	g_seq_heartbeat;
@@ -237,8 +239,10 @@ EXPORT void s1_telemetry_task(INT stacd, void *exinf)
 	tm_printf((UB*)"tlm: telemetry task started (pri %d)\n", S1_PRI_TLM);
 
 	for (;;) {
+		uint64_t t_start = app_time_us_64();
 		UW	now     = now_ms();
 		UH	session = tlm_bridge_session();
+		UW	took_us;
 
 		run_commands();
 		if (session == 0u) {
@@ -253,8 +257,23 @@ EXPORT void s1_telemetry_task(INT stacd, void *exinf)
 				send_heartbeat(session, now);
 			}
 		}
+
+		took_us = (UW)(app_time_us_64() - t_start);
+		if (took_us > g_diag.loop_max_us) {
+			g_diag.loop_max_us = took_us;
+		}
+		g_diag.cores_seen |= 1u << tk_get_prc();
+		g_diag.loops++;
+
 		/* Sleep one tick, or less if the WiFi task wakes us with a
 		   command (tk_wup_tsk in tlm_bridge.c). */
 		tk_slp_tsk(TLM_TASK_TICK_MS);
 	}
+}
+
+EXPORT void s1_tlm_get_diag(S1_DIAG *p_out)
+{
+	p_out->loops       = g_diag.loops;
+	p_out->loop_max_us = g_diag.loop_max_us;
+	p_out->cores_seen  = g_diag.cores_seen;
 }
