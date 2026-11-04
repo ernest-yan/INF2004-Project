@@ -9,6 +9,7 @@
 
 #include "../app.h"
 #include "tlm_config.h"
+#include "tlm_codec.h"
 
 /* Outgoing frames: telemetry task -> WiFi service task.
  * Each message = 1 topic-ID byte (TLM_TID_...) + payload.
@@ -23,6 +24,7 @@ typedef struct {
 	UB	code;			/* tlm_cmd_code_t */
 	UH	seq;
 	UW	t_rx_us;		/* when the WiFi task received it */
+	char	map[TLM_MAP_LETTERS];	/* TLM_CMD_MAP only */
 } S1_CMD;
 
 IMPORT ID s1_mbf_cmd;

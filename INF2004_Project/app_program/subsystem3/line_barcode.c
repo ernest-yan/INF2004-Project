@@ -24,6 +24,7 @@
 #include "../subsystem2/tkernel_adapter.h"
 #include "../subsystem4/tkernel_adapter.h"
 #include "../subsystem5/ultrasonic.h"
+#include "../subsystem1/subsystem1.h"	/* S1: s1_mission_go() (IF-18) */
 
 /* =====================================================================
  *  1. Driver / decoder
@@ -385,6 +386,10 @@ void process_sensors_distance_packed(uint32_t current_ticks,
     g_system_data.line_detected = line_state;
     g_system_data.cross_junction = cross_state;
     g_system_data.scanned_char = decoded_char;
+    if (decoded_char != '\0') {	/* S1: kept for slow readers (telemetry) */
+        g_system_data.barcode_count++;
+        g_system_data.last_char = decoded_char;
+    }
 
     if (!line_state) {
         g_system_data.fault_mask |= FAULT_LINE_LOSS;
@@ -438,7 +443,8 @@ typedef enum {
 	LF_TURN		/* the turn for the stored barcode is running */
 } line_follow_state_t;
 
-/* TRUE when S3 may drive: no S5 obstacle handling, no latched S2 brake. */
+/* TRUE when S3 may drive: the operator sent START (S1), no S5 obstacle
+   handling, no latched S2 brake. */
 static BOOL line_follow_allowed(void)
 {
 	subsystem5_status_t s5;
@@ -446,7 +452,8 @@ static BOOL line_follow_allowed(void)
 
 	subsystem5_get_status(&s5);
 	b2_get_status(&s2);
-	return (s5.state == subsystem5_STATE_MONITOR) && (s5.stop_required == 0U) &&
+	return s1_mission_go() &&
+	       (s5.state == subsystem5_STATE_MONITOR) && (s5.stop_required == 0U) &&
 	       (s2.brake_latched == 0U) && (s2.state != B2_FAULT);
 }
 
@@ -528,7 +535,7 @@ static void line_follow_task(INT stacd, void *exinf)
 			if (state != LF_IDLE) {
 				b2_stop();
 				state = LF_IDLE;
-				tm_printf((UB*)"[S3] holding: S5 or S2 needs the wheels stopped\n");
+				tm_printf((UB*)"[S3] holding: no START (S1), or S5 or S2 needs the wheels stopped\n");
 			}
 		} else if (state == LF_IDLE) {
 			if (d.line_detected) {

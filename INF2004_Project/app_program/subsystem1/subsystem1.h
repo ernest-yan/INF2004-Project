@@ -21,4 +21,16 @@
 /* Is the car connected to the broker right now? Safe from any task. */
 IMPORT BOOL s1_is_online(void);
 
+/* Has the operator sent START (and no STOP / E-STOP / RESET since)?
+ * For S3's line_follow_task to check before driving. Safe from any
+ * task, either core. At power-on: FALSE in MQTT builds (wait for START),
+ * TRUE otherwise (nobody can send START, so drive as before). */
+IMPORT BOOL s1_mission_go(void);
+
+#if TM_MQTT
+#define S1_GO_AT_POWER_ON	FALSE
+#else
+#define S1_GO_AT_POWER_ON	TRUE
+#endif
+
 #endif /* SUBSYSTEM1_H */

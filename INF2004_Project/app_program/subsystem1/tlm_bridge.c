@@ -126,6 +126,10 @@ uint16_t tlm_bridge_handle_cmd(const uint8_t *p_data, uint16_t len,
 		q.code    = cmd.code;
 		q.seq     = cmd.seq;
 		q.t_rx_us = (UW)t0;
+		q.map[0]  = cmd.map[0];
+		q.map[1]  = cmd.map[1];
+		q.map[2]  = cmd.map[2];
+		q.map[3]  = cmd.map[3];
 		if (tk_snd_mbf(s1_mbf_cmd, &q, (INT)sizeof(q), TMO_POL) != E_OK) {
 			res = TLM_RES_QUEUE_FULL;	/* reported, never hidden */
 			g_stats.queue_full++;
