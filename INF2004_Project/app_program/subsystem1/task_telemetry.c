@@ -257,12 +257,22 @@ EXPORT void s1_telemetry_task(INT stacd, void *exinf)
 		if (session == 0u) {
 			g_prev_valid = FALSE;	/* offline: nothing to send */
 		} else {
+			/* Schedule from the previous deadline, not from now:
+			   the task wakes about every 60 ms, so "now + period"
+			   stretched each 200 ms status to 240 ms (~4.2 Hz).
+			   Resync only after falling a whole period behind. */
 			if ((W)(now - next_status) >= 0) {
-				next_status = now + TLM_STATUS_PERIOD_MS;
+				next_status += TLM_STATUS_PERIOD_MS;
+				if ((W)(now - next_status) >= 0) {
+					next_status = now + TLM_STATUS_PERIOD_MS;
+				}
 				send_status(session);
 			}
 			if ((W)(now - next_heartbeat) >= 0) {
-				next_heartbeat = now + TLM_HEARTBEAT_PERIOD_MS;
+				next_heartbeat += TLM_HEARTBEAT_PERIOD_MS;
+				if ((W)(now - next_heartbeat) >= 0) {
+					next_heartbeat = now + TLM_HEARTBEAT_PERIOD_MS;
+				}
 				send_heartbeat(session, now);
 			}
 		}
