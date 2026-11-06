@@ -16,6 +16,7 @@
 #include "../app_hw.h"
 #include "../subsystem2/motion.h"
 #include "../subsystem3/line_barcode.h"
+#include "../subsystem1/subsystem1.h"  /* s1_mission_go(): STOP cancels a bypass */
 
 /* PORT: replaces time_us_32().  RP2040 TIMER counts microseconds; TIMERAWL
  * (offset 0x28) is a non-latching read of the low 32 bits. */
@@ -75,6 +76,13 @@ static void subsystem5_unlock(void)
 #define subsystem5_STOP_TIMEOUT_MS      (1500U)
 #define subsystem5_MAX_INVALID_MONITOR  (3U)
 #define subsystem5_MAX_RESCANS          (1U)
+/* INTEGRATION FIX: an echo that rose but never came back in range is open
+ * space, not a fault.  It is reported as a valid reading this far away (the
+ * HC-SR04's 4 m limit), beyond every obstacle and clearance limit. */
+#define subsystem5_FAR_MM               (4000U)
+/* INTEGRATION FIX: close readings in a row before a stop, so one stray echo
+ * does not stop the car.  Under subsystem5_URGENT_MM one reading is enough. */
+#define subsystem5_CLOSE_READINGS       (2U)
 
 #define subsystem5_ECHO_WAIT_RISE       (1U)
 #define subsystem5_ECHO_WAIT_FALL       (2U)
@@ -100,6 +108,7 @@ static uint8_t s_range_active;
 static uint8_t s_scan_index;
 static uint8_t s_scan_retries;
 static uint8_t s_monitor_invalid;
+static uint8_t s_close_count;
 static uint8_t s_servo_angle;
 static uint8_t s_fine_angles[subsystem5_FINE_COUNT];
 static uint32_t s_range_started_us;
@@ -296,6 +305,19 @@ static bool subsystem5_ping_result(uint32_t now_us, subsystem5_sample_t *result)
         result->distance_mm = (uint16_t)((pulse_us * 10U) / 58U);
         result->valid = 1U;
     }
+    else if ((phase == subsystem5_ECHO_WAIT_FALL) ||
+             ((phase == subsystem5_ECHO_COMPLETE) && (pulse_us > 23200U)))
+    {
+        /* INTEGRATION FIX: the echo rose, so the sensor is alive, but nothing
+         * came back in range: open space.  Only an echo pin that never rises
+         * (e.g. unplugged) stays invalid and can fault. */
+        result->distance_mm = subsystem5_FAR_MM;
+        result->valid = 1U;
+    }
+    else
+    {
+        /* Echo never rose, or a pulse too short to use. */
+    }
     s_range_active = 0U;
     return true;
 }
@@ -306,6 +328,16 @@ static void subsystem5_abort_pending_echo(void)
     s_range_active = 0U;
 }
 
+/* TRUE when a close reading should stop the car (see the monitor state). */
+static bool subsystem5_watch_active(void)
+{
+#if APP_MISSION_ENABLE
+    return s3_line_following() ? true : false;
+#else
+    return true;    /* nothing drives in this build: keep the old behaviour */
+#endif
+}
+
 static void subsystem5_reset_for_monitor(void)
 {
     s_status.fault = subsystem5_FAULT_NONE;
@@ -314,6 +346,7 @@ static void subsystem5_reset_for_monitor(void)
     s_status.state = subsystem5_STATE_MONITOR;
     s_status.front_valid = 0U;
     s_monitor_invalid = 0U;
+    s_close_count = 0U;
     subsystem5_abort_pending_echo();
     s_stopped_confirmed = 0U;
     s_stationary_scan_requested = 0U;
@@ -348,10 +381,15 @@ static void subsystem5_prepare_fine(void)
     uint16_t closest_mm = UINT16_MAX;
     uint8_t focus = 90U;
     uint8_t index;
+    uint8_t invalid = 0U;
 
     for (index = 0U; index < subsystem5_COARSE_COUNT; index++)
     {
         const subsystem5_sample_t *point = &s_samples.coarse[index];
+        if (point->valid == 0U)
+        {
+            invalid++;
+        }
         if ((point->valid != 0U) &&
             (point->distance_mm <= subsystem5_OBSTACLE_ZONE_MM) &&
             (point->distance_mm < closest_mm))
@@ -361,6 +399,14 @@ static void subsystem5_prepare_fine(void)
         }
     }
 
+    if ((closest_mm == UINT16_MAX) && (invalid == 0U))
+    {
+        /* INTEGRATION FIX: every ray answered and nothing is there (the
+         * obstacle moved, or it was a stray echo): carry on, not a fault. */
+        tm_printf((UB*)"[S5] scan found nothing, carrying on\n");
+        subsystem5_reset_for_monitor();
+        return;
+    }
     if (closest_mm == UINT16_MAX)
     {
         if (s_scan_retries < subsystem5_MAX_RESCANS)
@@ -396,8 +442,15 @@ static void subsystem5_scan_finish(void)
     s_status.profile = subsystem5_profile_analyze(&s_samples,
                                           subsystem5_OBSTACLE_ZONE_MM,
                                           subsystem5_SIDE_CLEAR_MM);
-    if ((s_status.profile.profile_valid == 0U) ||
+    if ((s_status.profile.profile_valid != 0U) &&
         (s_status.profile.obstacle_found == 0U))
+    {
+        /* INTEGRATION FIX: a complete scan with nothing in it carries on. */
+        tm_printf((UB*)"[S5] scan found nothing, carrying on\n");
+        subsystem5_reset_for_monitor();
+        return;
+    }
+    if (s_status.profile.profile_valid == 0U)
     {
         if (s_scan_retries < subsystem5_MAX_RESCANS)
         {
@@ -679,10 +732,15 @@ void subsystem5_poll(void)
         front.angle_deg = 90U;
         if (subsystem5_ping_result(now_us, &front))
         {
-            s_status.front_valid = front.valid;
-            s_status.front_mm = front.distance_mm;
+            const bool far = (front.valid != 0U) &&
+                             (front.distance_mm == subsystem5_FAR_MM);
+
+            /* Open space is reported as "no echo" to telemetry, as before. */
+            s_status.front_valid = far ? 0U : front.valid;
+            s_status.front_mm = far ? subsystem5_UNKNOWN_MM : front.distance_mm;
             if (front.valid == 0U)
             {
+                s_close_count = 0U;
                 if (s_monitor_invalid < subsystem5_MAX_INVALID_MONITOR)
                 {
                     s_monitor_invalid++;
@@ -695,15 +753,33 @@ void subsystem5_poll(void)
             else
             {
                 s_monitor_invalid = 0U;
-                if (front.distance_mm <= subsystem5_DETECT_MM)
+                /* INTEGRATION FIX: only react while S3 is following the line.
+                 * A parked car must not start a bypass, and S3's junction
+                 * moves and turns must not be cut short. */
+                if ((!subsystem5_watch_active()) ||
+                    (front.distance_mm > subsystem5_DETECT_MM))
                 {
-                    /* Request stopping on the FIRST close valid reading;
-                     * do not wait for the slow servo scan while moving. */
-                    s_status.stop_required = 1U;
-                    s_stop_request_us = now_us;
-                    s_scan_retries = 0U;
-                    s_status.state = subsystem5_STATE_WAIT_STOP;
-                    subsystem5_send_event(subsystem5_EVENT_STOP_REQUIRED, subsystem5_FAULT_NONE);
+                    s_close_count = 0U;
+                }
+                else
+                {
+                    if (s_close_count < UINT8_MAX)
+                    {
+                        s_close_count++;
+                    }
+                    /* INTEGRATION FIX: 2 close readings in a row, or 1 when
+                     * under subsystem5_URGENT_MM, so one stray echo does not
+                     * stop the car.  Still no wait for the slow servo scan. */
+                    if ((front.distance_mm < subsystem5_URGENT_MM) ||
+                        (s_close_count >= subsystem5_CLOSE_READINGS))
+                    {
+                        s_close_count = 0U;
+                        s_status.stop_required = 1U;
+                        s_stop_request_us = now_us;
+                        s_scan_retries = 0U;
+                        s_status.state = subsystem5_STATE_WAIT_STOP;
+                        subsystem5_send_event(subsystem5_EVENT_STOP_REQUIRED, subsystem5_FAULT_NONE);
+                    }
                 }
             }
         }
@@ -733,7 +809,18 @@ void subsystem5_poll(void)
 #if APP_MISSION_ENABLE
     else if (s_status.state == subsystem5_STATE_PROFILE_READY)
     {
-        subsystem5_bypass_begin();
+        /* INTEGRATION FIX: STOP (or E-STOP) during the scan clears
+         * s1_mission_go(); then the bypass must not drive.  Drop the scan;
+         * after START, S5 sees the obstacle again and rescans. */
+        if (s1_mission_go())
+        {
+            subsystem5_bypass_begin();
+        }
+        else
+        {
+            tm_printf((UB*)"[S5] STOP during the scan: bypass cancelled\n");
+            subsystem5_reset_for_monitor();
+        }
     }
     else if (s_status.state == subsystem5_STATE_BYPASS)
     {
@@ -767,6 +854,7 @@ int subsystem5_ultrasonic_init(subsystem5_event_publish_fn publish, void *contex
     s_publish_context = context;
     s_range_active = 0U;
     s_monitor_invalid = 0U;
+    s_close_count = 0U;
     s_scan_retries = 0U;
     s_scan_index = 0U;
     s_stopped_confirmed = 0U;

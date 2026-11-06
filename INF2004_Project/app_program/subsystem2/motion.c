@@ -468,7 +468,10 @@ void b2_poll(void)
     }
     const uint32_t elapsed_ms = (uint32_t)((now - s_last_poll_us) / 1000ULL);
     s_last_poll_us = now;
-    if (elapsed_ms > 15U) { ++s_status.deadline_misses; }
+    /* INTEGRATION FIX: the loop really runs every 20 ms (tk_dly_tsk(10) on
+     * the 10 ms kernel tick), so the old 15 ms limit counted every loop as
+     * a miss. */
+    if (elapsed_ms > 20U) { ++s_status.deadline_misses; }
     if (elapsed_ms == 0U) { return; }
     const uint32_t deltas[2] = {ticks[0] - s_prev_ticks[0],
                                  ticks[1] - s_prev_ticks[1]};

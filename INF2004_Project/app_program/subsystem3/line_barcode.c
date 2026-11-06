@@ -443,18 +443,30 @@ typedef enum {
 	LF_TURN		/* the turn for the stored barcode is running */
 } line_follow_state_t;
 
+/* Read by S5 from another task: see s3_line_following(). */
+static volatile BOOL s_lf_following = FALSE;
+
+EXPORT BOOL s3_line_following(void)
+{
+	return s_lf_following;
+}
+
 /* TRUE when S3 may drive: the operator sent START (S1), no S5 obstacle
-   handling, no latched S2 brake. */
+   handling, no latched S2 brake, and S4 calibrated (a RESET makes S4
+   recalibrate, and moving then would ruin it). */
 static BOOL line_follow_allowed(void)
 {
 	subsystem5_status_t s5;
 	b2_status_t s2;
+	b4_status_t s4;
 
 	subsystem5_get_status(&s5);
 	b2_get_status(&s2);
+	b4_get_status(&s4);
 	return s1_mission_go() &&
 	       (s5.state == subsystem5_STATE_MONITOR) && (s5.stop_required == 0U) &&
-	       (s2.brake_latched == 0U) && (s2.state != B2_FAULT);
+	       (s2.brake_latched == 0U) && (s2.state != B2_FAULT) &&
+	       (s4.calibration_ready != 0U);
 }
 
 static void line_follow_drive(const LineBarcodeData_t *d, BOOL *line_is_left)
@@ -535,7 +547,7 @@ static void line_follow_task(INT stacd, void *exinf)
 			if (state != LF_IDLE) {
 				b2_stop();
 				state = LF_IDLE;
-				tm_printf((UB*)"[S3] holding: no START (S1), or S5 or S2 needs the wheels stopped\n");
+				tm_printf((UB*)"[S3] holding: no START (S1), S4 calibrating, or S5 or S2 needs the wheels stopped\n");
 			}
 		} else if (state == LF_IDLE) {
 			if (d.line_detected) {
@@ -607,6 +619,7 @@ static void line_follow_task(INT stacd, void *exinf)
 						state = LF_IDLE;
 						tm_printf((UB*)"[S3] junction advance refused\n");
 					}
+					s_lf_following = (state == LF_FOLLOW);
 					(void)tk_dly_tsk(S3_FOLLOW_PERIOD_MS);
 					continue;
 				}
@@ -622,8 +635,16 @@ static void line_follow_task(INT stacd, void *exinf)
 			}
 		}
 
+		s_lf_following = (state == LF_FOLLOW);
 		(void)tk_dly_tsk(S3_FOLLOW_PERIOD_MS);
 	}
+}
+
+#else /* !APP_MISSION_ENABLE */
+
+EXPORT BOOL s3_line_following(void)
+{
+	return FALSE;	/* no line following in this build */
 }
 
 #endif /* APP_MISSION_ENABLE */

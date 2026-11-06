@@ -5,10 +5,14 @@
 
 #include <stdbool.h>
 
-/* Includes the robot's projected half-width and a measured safety margin. */
-#define subsystem5_LEFT_MIN_DEG   (110U)
-#define subsystem5_RIGHT_MAX_DEG  (70U)
-#define subsystem5_MIN_SIDE_RAYS  (2U)
+/* INTEGRATION FIX: only the outer rays (>= 50 degrees off forward) count as
+ * "sides".  The old 70/110 limits put the 70- and 110-degree rays in the side
+ * sectors, and a box about 22 cm or wider at ~30 cm already covers those rays,
+ * so both sides looked blocked (FAULT_NO_SAFE_SIDE).  The coarse 30/150 rays
+ * are always there, so one valid ray per side is enough. */
+#define subsystem5_LEFT_MIN_DEG   (140U)
+#define subsystem5_RIGHT_MAX_DEG  (40U)
+#define subsystem5_MIN_SIDE_RAYS  (1U)
 
 typedef struct
 {

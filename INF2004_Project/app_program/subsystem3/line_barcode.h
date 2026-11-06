@@ -129,4 +129,10 @@ MovementAction_t get_action_for_character(char c);
    character ('A'..'Z').  Receive with tk_rcv_mbf(mbf_barcode, &c, TMO_FEVR). */
 IMPORT ID	mbf_barcode;
 
+/* TRUE only while line_follow_task is plainly following the line (not
+   idle, not driving onto a junction, not turning).  S5 only reacts to
+   obstacles while this is TRUE, so a parked car never starts a bypass and a
+   junction move is never cut short.  Always FALSE without APP_MISSION_ENABLE. */
+IMPORT BOOL	s3_line_following(void);
+
 #endif /* LINE_BARCODE_H */
