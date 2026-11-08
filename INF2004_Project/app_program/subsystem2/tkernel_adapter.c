@@ -13,7 +13,7 @@
 
 /* PROVISIONAL: calibrate on the assembled robot before enabling motion. */
 #ifndef B2_CAL_TICKS_PER_WHEEL_REV
-#define B2_CAL_TICKS_PER_WHEEL_REV       (20U)
+#define B2_CAL_TICKS_PER_WHEEL_REV       (930U)	/* measured 2026-11-08: 10 hand turns, L 962 / R 896 per turn */
 #endif
 #ifndef B2_CAL_WHEEL_CIRCUMFERENCE_MM
 #define B2_CAL_WHEEL_CIRCUMFERENCE_MM   (210U)

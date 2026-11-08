@@ -572,7 +572,12 @@ void b2_poll(void)
             const int32_t duty = b2_clamp(ff + p + integral,
                                              B2_MIN_OUTPUT, s_cfg.max_pwm_permil);
             pwm_cmd[i] = (request < 0) ? -duty : duty;
-            const uint64_t age = now - edges_at_us[i];
+            /* INTEGRATION FIX: an encoder edge can land between reading `now`
+             * and taking the lock, making the edge newer than `now`; the
+             * unsigned subtraction then wraps to a huge age and a false
+             * ENCODER_STALL.  Frequent at ~450 edges/s. */
+            const uint64_t age = (edges_at_us[i] > now) ? 0ULL :
+                                 (now - edges_at_us[i]);
             if (((s_status.state == B2_EXECUTE_GOAL) ||
                  (s_status.state == B2_TRACK_SPEED)) &&
                 (b2_abs32(request) >= 40) &&
