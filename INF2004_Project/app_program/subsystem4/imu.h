@@ -28,6 +28,8 @@ typedef struct
     uint16_t i2c_speed_khz;        /* proposed 100/400. */
     uint16_t impact_threshold_mg;  /* provisional: e.g. 600 mg above 1g. */
     uint8_t forward_axis_sign;     /* 1 normal, 0 invert. Physical calibration. */
+    uint8_t forward_axis_is_y;     /* 0: chip X points forward, 1: chip Y does
+                                      (GY-511 header mounted across the car). */
     uint8_t calibration_samples;   /* 20..100 samples, robot stationary. */
 } b4_config_t;
 typedef struct

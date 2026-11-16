@@ -88,6 +88,16 @@ static void subsystem5_unlock(void)
 #define subsystem5_ECHO_WAIT_FALL       (2U)
 #define subsystem5_ECHO_COMPLETE        (3U)
 
+/* ECHO is timed by polling at the lowest task priority, so a higher-priority
+ * task (WiFi start-up, telemetry, motion) can run in the middle of a ping.
+ * A gap this long between two polls could hide a whole echo pulse (the
+ * shortest usable one is 116 us) or stretch its width, so such a ping is
+ * thrown away and repeated instead of being counted as a sensor failure.
+ * After this many disturbed pings in a row the result is used anyway, so a
+ * permanently busy CPU still ends in a fault rather than silence. */
+#define subsystem5_POLL_GAP_US          (100U)
+#define subsystem5_MAX_DISTURBED        (5U)
+
 static const uint8_t s_coarse_angles[subsystem5_COARSE_COUNT] =
 {
     30U, 60U, 90U, 120U, 150U
@@ -97,6 +107,8 @@ static const uint8_t s_coarse_angles[subsystem5_COARSE_COUNT] =
 static volatile uint8_t s_echo_phase;
 static volatile uint32_t s_echo_rise_us;
 static volatile uint32_t s_echo_pulse_us;
+static uint8_t s_echo_disturbed;    /* this ping saw a poll gap > POLL_GAP_US */
+static uint8_t s_disturbed_run;     /* disturbed pings dropped in a row */
 
 /* Poll-task-owned state; other tasks use command flags and snapshot API. */
 static subsystem5_status_t s_status;
@@ -210,10 +222,20 @@ static void subsystem5_fault(subsystem5_fault_t fault)
  * level instead of edge events. */
 static void subsystem5_echo_measure(void)
 {
+    /* From the ping's start, so a preemption around the TRIG pulse counts too
+     * (the 12 us TRIG pulse itself is well under POLL_GAP_US). */
+    uint32_t last_poll = s_range_started_us;
+
     for (;;)
     {
         const uint32_t t = subsystem5_now_us();
         const UINT level = gpio_get_val(subsystem5_ECHO_GPIO);
+
+        if (subsystem5_elapsed(last_poll, t) > subsystem5_POLL_GAP_US)
+        {
+            s_echo_disturbed = 1U;  /* preempted: an edge may have been missed */
+        }
+        last_poll = t;
 
         if (subsystem5_elapsed(s_range_started_us, t) >= subsystem5_ECHO_TIMEOUT_US)
         {
@@ -250,6 +272,7 @@ static bool subsystem5_ping_begin(uint32_t now_us)
     s_echo_phase = subsystem5_ECHO_WAIT_RISE;
     s_echo_pulse_us = 0U;
     s_echo_rise_us = 0U;
+    s_echo_disturbed = 0U;
 
     s_range_active = 1U;
     s_range_started_us = subsystem5_now_us();
@@ -295,6 +318,16 @@ static bool subsystem5_ping_result(uint32_t now_us, subsystem5_sample_t *result)
     {
         return false;
     }
+
+    if ((s_echo_disturbed != 0U) && (s_disturbed_run < subsystem5_MAX_DISTURBED))
+    {
+        /* Not a sample: drop it.  The caller sees "still pending" with no
+         * range active, so it simply starts the next ping. */
+        s_disturbed_run++;
+        s_range_active = 0U;
+        return false;
+    }
+    s_disturbed_run = 0U;
 
     result->valid = 0U;
     result->distance_mm = subsystem5_UNKNOWN_MM;

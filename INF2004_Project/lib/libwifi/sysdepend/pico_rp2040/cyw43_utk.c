@@ -73,7 +73,7 @@ static const char *link_status_str(int32_t status)
 {
     switch(status) {
     case CYW43_LINK_DOWN:   return "down";
-    case CYW43_LINK_JOIN:   return "joined AP, waiting for IP";
+    case CYW43_LINK_JOIN:   return "join in progress (searching / associating)";
     case CYW43_LINK_NOIP:   return "joined AP, no IP yet";
     case CYW43_LINK_UP:     return "up";
     case CYW43_LINK_FAIL:   return "FAILED (association failure)";

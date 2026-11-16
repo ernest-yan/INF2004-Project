@@ -104,6 +104,11 @@ EXPORT void startup_clock(ATR clkatr)
 
 	out_w(CLK_REF+CLK_x_DIV, div);
 
+	/* Watchdog tick generator: the RP2040 TIMER counts its ticks.  One tick
+	 * every XOSC_MHz clk_ref cycles = 1 us.  Without this the TIMER rate is
+	 * whatever the boot path left behind (seen ~18x slow after power-on). */
+	out_w(0x4005802Cu, (1u << 9) | XOSC_MHz);	/* WATCHDOG TICK: ENABLE | CYCLES */
+
 	/* CLK SYS settings */
 	div = (TMCLK_MHz << 8) / TMCLK_MHz;
 	if (div > in_w(CLK_SYS+CLK_x_DIV)) out_w(CLK_SYS+CLK_x_DIV, div);

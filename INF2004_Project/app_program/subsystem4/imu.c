@@ -163,8 +163,10 @@ void b4_poll(void)
         return;
     }
     s_i2c_consecutive = 0U;
-    const float fx = (s_cfg.forward_axis_sign != 0U) ? (float)ax : -(float)ax;
-    const float fy = (float)ay;
+    /* fx = car's forward axis, fy = car's sideways axis (chip X or Y). */
+    const float fwd = (s_cfg.forward_axis_is_y != 0U) ? (float)ay : (float)ax;
+    const float fx = (s_cfg.forward_axis_sign != 0U) ? fwd : -fwd;
+    const float fy = (s_cfg.forward_axis_is_y != 0U) ? (float)ax : (float)ay;
     const float fz = (float)az;
     const float magnitude = b4_sqrtf((fx * fx) + (fy * fy) + (fz * fz));
     const float measured_pitch = b4_atan2f(-fx, b4_sqrtf(fy * fy + fz * fz)) *

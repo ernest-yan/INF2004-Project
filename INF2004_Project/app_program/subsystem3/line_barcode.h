@@ -104,7 +104,9 @@ MovementAction_t get_action_for_character(char c);
 #define S3_FOLLOW_PRI		17	/* priority band 16-17 (TEAM.md) */
 #define S3_FOLLOW_PERIOD_MS	10
 #define S3_LINE_SPEED_MM_S	100	/* both wheels, on the line */
-#define S3_STEER_SPEED_MM_S	90	/* outer wheel while steering (inner = 0) */
+#define S3_STEER_SPEED_MM_S	90	/* outer wheel while steering */
+#define S3_STEER_INNER_MM_S	30	/* inner wheel while steering: a curve, not a
+					   pivot (inner = 0 overshot the line, 2026-11-13) */
 #define S3_TURN_SPEED_MM_S	80	/* barcode turns */
 #define S3_TURN_TIMEOUT_MS	6000
 #define S3_JUNCTION_CONFIRM_MS	40	/* both sensors on the line this long */
