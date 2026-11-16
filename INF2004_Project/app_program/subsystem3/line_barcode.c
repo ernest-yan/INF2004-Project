@@ -120,8 +120,13 @@ static uint8_t g_width_count = 0;
 static uint32_t g_last_edge_time = 0;
 static bool g_last_sensor_state = false;
 static bool g_sensor_state_initialized = false;
+static bool g_edge_pending = false;		/* GP16 changed, not yet held */
+static uint32_t g_edge_pending_since = 0;
 static uint32_t g_last_success_decode_time = 0;
 static bool g_have_successful_decode = false;
+/* TRUE while GP16 is collecting a barcode (first edge until the quiet
+   timeout).  Read by line_follow_task on the other core: one aligned byte. */
+static volatile bool g_scan_active = false;
 
 /* Reverse exactly nine bits so scans in either direction can be matched. */
 static uint16_t reverse_9bits(uint16_t value)
@@ -343,10 +348,24 @@ void process_sensors_distance_packed(uint32_t current_ticks,
         g_last_edge_time = now_us;
         g_sensor_state_initialized = true;
     } else if (ir_right != g_last_sensor_state) {
-        uint32_t duration = now_us - g_last_edge_time;
-        append_duration(duration);
-        g_last_edge_time = now_us;
-        g_last_sensor_state = ir_right;
+        /*
+         * Debounce: accept an edge only once the new level has held for
+         * S3_EDGE_DEBOUNCE_US.  The edge is timestamped where the change
+         * began, so real widths are not shortened; flickers at a bar edge
+         * are dropped instead of becoming two fake elements.
+         */
+        if (!g_edge_pending) {
+            g_edge_pending = true;
+            g_edge_pending_since = now_us;
+        }
+        if ((uint32_t)(now_us - g_edge_pending_since) >= S3_EDGE_DEBOUNCE_US) {
+            append_duration(g_edge_pending_since - g_last_edge_time);
+            g_last_edge_time = g_edge_pending_since;
+            g_last_sensor_state = ir_right;
+            g_edge_pending = false;
+        }
+    } else {
+        g_edge_pending = false;	/* flicker ended: back to the old level */
     }
 
     uint32_t quiet_time = now_us - g_last_edge_time;
@@ -355,6 +374,26 @@ void process_sensors_distance_packed(uint32_t current_ticks,
      * Finalize when no transition has occurred for TIMEOUT_US. Decode from the
      * collected edge durations and then clear the scan buffer.
      */
+#if S3_DEBUG_SCAN
+    {
+        static uint32_t dbg_last_us = 0;
+        /* Only while idle: printing mid-scan would distort bar widths. */
+        if (g_width_count == 0 && now_us - dbg_last_us >= 2000000u) {
+            dbg_last_us = now_us;
+            tm_printf((UB*)"[S3 dbg] idle  GP16=%d  L=%d  C=%d\n",
+                      ir_right ? 1 : 0, ir_left ? 1 : 0, ir_center ? 1 : 0);
+        }
+        if (quiet_time >= TIMEOUT_US && g_width_count > 0) {
+            /* Element 0 is the idle time before the first edge. */
+            tm_printf((UB*)"[S3 dbg] scan ended: %d elements (need %d+), us:",
+                      g_width_count, CODE39_FRAME_ELEMENTS);
+            for (uint8_t i = 0; i < g_width_count; ++i) {
+                tm_printf((UB*)" %u", (unsigned)g_widths[i]);
+            }
+            tm_printf((UB*)"\n");
+        }
+    }
+#endif
     if (g_width_count >= 9 && quiet_time >= TIMEOUT_US) {
         bool cooldown_over = !g_have_successful_decode ||
             (uint32_t)(now_us - g_last_success_decode_time) >=
@@ -367,12 +406,20 @@ void process_sensors_distance_packed(uint32_t current_ticks,
                 g_have_successful_decode = true;
             }
         }
+#if APP_BARCODE_ONLY
+        if (decoded_char == '\0') {
+            tm_printf((UB*)"[barcode] no letter (%d bars+spaces seen, a full"
+                      " barcode is %d)\n", g_width_count - 1,
+                      CODE39_FRAME_ELEMENTS);
+        }
+#endif
 
         g_width_count = 0;
     } else if (quiet_time >= TIMEOUT_US && g_width_count > 0) {
         /* Incomplete scan; discard it after the quiet timeout. */
         g_width_count = 0;
     }
+    g_scan_active = (g_width_count > 0);
 
     /* Line tracking: retain the original active-HIGH logic. */
     uint8_t line_state = (ir_left || ir_center) ? 1u : 0u;
@@ -471,10 +518,29 @@ static BOOL line_follow_allowed(void)
 
 static void line_follow_drive(const LineBarcodeData_t *d, BOOL *line_is_left)
 {
+	static BOOL hold = FALSE;
+	static uint32_t hold_since = 0u;
 	b2_command_t cmd = {0};
 
+	/* Hold straight while a barcode is being scanned: the barcode sensor is
+	   on the right, so steering would change its speed mid-scan and stretch
+	   some bars (inner wheel ~0 mm/s), and the letter would not decode.
+	   Capped so stray GP16 edges cannot lock the steering. */
+	if (g_scan_active) {
+		if (!hold) {
+			hold = TRUE;
+			hold_since = app_time_us_32();
+		}
+	} else {
+		hold = FALSE;
+	}
+
 	cmd.type = B2_CMD_SPEED;
-	if (d->ir_center_raw) {
+	if (hold && ((uint32_t)(app_time_us_32() - hold_since) <
+		     (S3_SCAN_HOLD_MAX_MS * 1000u))) {
+		cmd.left_mm_s = S3_LINE_SPEED_MM_S;
+		cmd.right_mm_s = S3_LINE_SPEED_MM_S;
+	} else if (d->ir_center_raw) {
 		*line_is_left = FALSE;
 		cmd.left_mm_s = S3_LINE_SPEED_MM_S;
 		cmd.right_mm_s = S3_LINE_SPEED_MM_S;

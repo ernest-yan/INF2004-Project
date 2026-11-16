@@ -98,15 +98,36 @@ MovementAction_t get_action_for_character(char c);
 #define S3_POLL_DELAY_MS	0
 
 /*
+ * TEMPORARY bench debug.  1 = print every finished GP16 scan (element count
+ * and widths in us) and, while idle, the sensor levels every 2 s, so a scan
+ * that does not decode can be diagnosed.  The demo must use 0.
+ */
+#define S3_DEBUG_SCAN		0
+
+/*
+ * GP16 must hold a new level this long before it counts as a bar edge.
+ * 0 = off: every edge counts, exactly as the original decoder (this is the
+ * setting that decoded 'F' on the bench, 2026-11-13).  8000 was tried and
+ * merged real narrow bars at hand speed (~7 ms), so keep it 0 unless the car
+ * shows edge flicker at driving speed, and then stay well below the
+ * narrowest bar time.
+ */
+#define S3_EDGE_DEBOUNCE_US	0u
+
+/*
  * Line following + barcode turns (line_follow_task, APP_MISSION_ENABLE only).
  * PROVISIONAL values: tune on the real track, wheels lifted first.
  */
 #define S3_FOLLOW_PRI		17	/* priority band 16-17 (TEAM.md) */
 #define S3_FOLLOW_PERIOD_MS	10
-#define S3_LINE_SPEED_MM_S	100	/* both wheels, on the line */
-#define S3_STEER_SPEED_MM_S	90	/* outer wheel while steering */
+#define S3_LINE_SPEED_MM_S	70	/* both wheels, on the line (100 lost the
+					   line within 0.3 s, 2026-11-16 telemetry) */
+#define S3_STEER_SPEED_MM_S	70	/* outer wheel while steering (90 ran
+					   at 115-134 mm/s and overshot) */
 #define S3_STEER_INNER_MM_S	30	/* inner wheel while steering: a curve, not a
 					   pivot (inner = 0 overshot the line, 2026-11-13) */
+#define S3_SCAN_HOLD_MAX_MS	3000	/* drive straight at most this long while
+					   GP16 scans (141 mm barcode = 2 s at 70) */
 #define S3_TURN_SPEED_MM_S	80	/* barcode turns */
 #define S3_TURN_TIMEOUT_MS	6000
 #define S3_JUNCTION_CONFIRM_MS	40	/* both sensors on the line this long */

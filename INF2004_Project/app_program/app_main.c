@@ -119,6 +119,16 @@ EXPORT INT usermain(void)
 	tm_printf((UB*)"single-core build\n");
 #endif
 
+#if APP_BARCODE_ONLY
+	/* Bench image (app.h): only the S3 barcode task, nothing else */
+	CHECK(subsystem3_init(), "subsystem3_init");
+	CHECK(subsystem3_start(), "subsystem3_start");
+	tm_printf((UB*)"BARCODE-ONLY image: pass a Code 39 barcode under the"
+		  " right sensor (GP16)\n\n");
+	tk_slp_tsk(TMO_FEVR);
+	return 0;
+#endif
+
 	/* Phase 1: every subsystem creates its kernel objects */
 	CHECK(subsystem1_init(), "subsystem1_init");
 	CHECK(subsystem2_init(), "subsystem2_init");

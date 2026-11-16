@@ -1,0 +1,8 @@
+1794814085.477,sent_cmd,1100000001,"{""cmd"": ""start"", ""session"": 0, ""seq"": 1, ""letters"": """"}"
+1794814101.234,sent_cmd,1400000002,"{""cmd"": ""reset"", ""session"": 0, ""seq"": 2, ""letters"": """"}"
+1794814103.791,sent_cmd,1100000003,"{""cmd"": ""start"", ""session"": 0, ""seq"": 3, ""letters"": """"}"
+1794814120.549,sent_cmd,1200000004,"{""cmd"": ""stop"", ""session"": 0, ""seq"": 4, ""letters"": """"}"
+1794814125.549,sent_cmd,1400000005,"{""cmd"": ""reset"", ""session"": 0, ""seq"": 5, ""letters"": """"}"
+1794814128.072,sent_cmd,1100000006,"{""cmd"": ""start"", ""session"": 0, ""seq"": 6, ""letters"": """"}"
+1794814152.321,sent_cmd,1400000007,"{""cmd"": ""reset"", ""session"": 0, ""seq"": 7, ""letters"": """"}"
+1794814155.303,sent_cmd,1100000008,"{""cmd"": ""start"", ""session"": 0, ""seq"": 8, ""letters"": """"}"

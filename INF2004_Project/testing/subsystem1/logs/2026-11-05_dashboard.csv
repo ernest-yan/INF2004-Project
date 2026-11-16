@@ -1,0 +1,2 @@
+1793850042.783,sent_cmd,1100000001,"{""cmd"": ""start"", ""session"": 0, ""seq"": 1, ""letters"": """"}"
+1793850157.682,sent_cmd,1200000002,"{""cmd"": ""stop"", ""session"": 0, ""seq"": 2, ""letters"": """"}"

@@ -33,7 +33,14 @@
  *  always off in test builds.  Set to 0 to bench-test a normal image with
  *  the robot holding still.
  * --------------------------------------------------------------------- */
-#if APP_TEST
+/*
+ * TEMPORARY bench switch.  1 = barcode-only image: usermain starts ONLY
+ * subsystem 3's barcode task (right sensor GP16), no WiFi, no wheels, no
+ * other subsystems; it prints each decoded letter.  The demo must use 0.
+ */
+#define APP_BARCODE_ONLY	0
+
+#if APP_TEST || APP_BARCODE_ONLY
 #define APP_MISSION_ENABLE	0
 #else
 #define APP_MISSION_ENABLE	1
