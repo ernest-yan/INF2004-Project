@@ -20,11 +20,21 @@ static ID	vc_tid;
 
 static void vc_check_timer(void)
 {
-	const uint32_t t0 = app_time_us_32();
-	uint32_t dt;
+	uint32_t dt = UINT32_MAX;
+	int i;
 
-	tk_dly_tsk(100);
-	dt = app_time_us_32() - t0;
+	/* Best of 3: at boot WiFi start-up can wake this task late, which only
+	   ever makes a reading too long, never too short. */
+	for (i = 0; i < 3; i++) {
+		const uint32_t t0 = app_time_us_32();
+		uint32_t d;
+
+		tk_dly_tsk(100);
+		d = app_time_us_32() - t0;
+		if (d < dt) {
+			dt = d;
+		}
+	}
 	if ((dt < 90000u) || (dt > 110000u)) {
 		tm_printf((UB*)"WARNING VC: RP2040 TIMER gave %u us for a 100 ms "
 			  "delay (expected ~100000). S3 barcode widths, S5 echo "
@@ -79,13 +89,15 @@ static void vc_print_health(void)
 	s3 = get_line_barcode_data_safe();
 
 	tm_printf((UB*)"[VC] S2 %s st=%d flt=%d enc=%u/%u | S3 L=%u C=%u R=%u line=%u"
-		  " | S4 %s st=%d pitch=%dcdeg | S5 st=%d front=%u%s\n",
+		  " | S4 %s st=%d pitch=%dcdeg a=%d/%d/%dmg | S5 st=%d front=%u%s\n",
 		  s2_ready() ? "ok" : "--", (int)s2.state, (int)s2.fault,
 		  (unsigned)s2.left_encoder_edges, (unsigned)s2.right_encoder_edges,
 		  (unsigned)s3.ir_left_raw, (unsigned)s3.ir_center_raw,
 		  (unsigned)s3.ir_right_raw, (unsigned)s3.line_detected,
 		  s4_ready() ? "ok" : "--", (int)s4.state,
 		  (int)s4.pitch_cdeg,
+		  (int)s4.acceleration_x_mg, (int)s4.acceleration_y_mg,
+		  (int)s4.acceleration_z_mg,
 		  (int)s5.state, (unsigned)s5.front_mm,
 		  s5.front_valid ? "mm" : "(invalid)");
 }

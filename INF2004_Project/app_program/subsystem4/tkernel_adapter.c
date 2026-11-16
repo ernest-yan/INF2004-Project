@@ -81,7 +81,11 @@ EXPORT ER subsystem4_init(void)
     s4_config.i2c_addr = B4_ACCEL_ADDR_DEFAULT;
     s4_config.i2c_speed_khz = 100U;
     s4_config.impact_threshold_mg = 600U; /* provisional; tune on course */
-    s4_config.forward_axis_sign = 1U;     /* verify sensor orientation */
+    /* GY-511 is mounted with its pin header across the car, so the chip's
+       Y axis is the car's forward axis.  Nose-up must give positive pitch:
+       if it reads negative, set forward_axis_sign = 0U. */
+    s4_config.forward_axis_is_y = 1U;
+    s4_config.forward_axis_sign = 1U;
     s4_config.calibration_samples = 50U;
     return E_OK;
 }

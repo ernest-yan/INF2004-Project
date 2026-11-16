@@ -8,15 +8,25 @@ IS33 car dashboard (laptop side) -- Buddy 1 / subsystem 1.
 Shows decoded telemetry, sends START / STOP / E-STOP, and logs everything
 (with laptop timestamps) to a CSV file you can use as test evidence.
 
+By default a live status panel is pinned to the top of the window: vehicle
+state, faults by name, wheel speeds and encoder rates, line sensors, tilt,
+obstacle, link health, the last ACK and event, and plain-language warnings
+(dead encoder, E-STOP latched, ultrasonic fault, stale link...). Commands
+are typed at the bottom as before. --no-panel gives the old scrolling output.
+Needs a window at least 21 rows tall; otherwise it falls back automatically.
+
 Keep the field tables below in sync with app_program/subsystem1/tlm_codec.c
 and app_program/subsystem1/MQTT_PROTOCOL.md.
 """
 import argparse
 import csv
 import json
+import os
+import shutil
 import sys
 import threading
 import time
+from collections import deque
 
 import paho.mqtt.client as mqtt
 
@@ -35,6 +45,17 @@ LINK_STATE = ["INIT", "WIFI_CONNECTING", "MQTT_CONNECTING", "ONLINE",
               "BACKOFF", "SAFE_LOCAL"]
 EVENT = {1: "STATE_CHANGE", 2: "BARCODE", 3: "HUMP_PEAK", 4: "OBSTACLE",
          5: "IMPACT", 6: "ESTOP"}
+# Names for the numbers in the status packet, used by the live panel.
+# Keep in sync with team_interfaces.h (TLM_FAULT_Sn, barcode_cmd_t,
+# event_source_t) and subsystem5/ultrasonic.h (subsystem5_state_t).
+FAULT_BITS = {2: "S2 motors/encoders", 3: "S3 line/barcode", 4: "S4 IMU/tilt",
+              5: "S5 ultrasonic"}
+OBS_STATE = ["MONITOR", "WAIT_STOP", "COARSE", "FINE", "PROFILE_READY", "BYPASS",
+             "FAULT"]
+BARCODE = ["none", "LEFT", "RIGHT", "STRAIGHT", "UTURN", "INVALID"]
+EVT_SRC = ["button", "laptop", "IMU impact", "motion", "ultrasonic", "line"]
+DRIVING = {"LINE_FOLLOW", "BARCODE_NAV", "OBSTACLE_AVOID"}   # wheels should turn
+SPEED_MAX, OBS_CM_MAX = (1 << 10) - 1, (1 << 9) - 1           # field saturation
 
 # (field name, bits) in wire order, after the 28-bit header.
 STATUS_FIELDS = [("vehicle_state", 3), ("estop", 1), ("line", 2), ("barcode", 3),
@@ -130,6 +151,340 @@ def encode_cmd(code: int, session: int, seq: int, letters: str = "") -> bytes:
             + seq.to_bytes(2, "big") + letters.encode("ascii"))
 
 
+def enc_delta(new: int, old: int) -> int:
+    """Difference of two 16-bit encoder counts, allowing for wrap-around."""
+    return ((new - old + 0x8000) & 0xFFFF) - 0x8000
+
+
+def fit(segments, cols: int) -> str:
+    """Join (text, ansi_colour) segments, cut to `cols` visible characters."""
+    out, left = [], cols
+    for text, colour in segments:
+        if left <= 0:
+            break
+        text = text[:left]
+        left -= len(text)
+        out.append(f"\x1b[{colour}m{text}\x1b[0m" if colour else text)
+    return "".join(out)
+
+
+GREEN, YELLOW, RED, DIM, BOLD, TITLE = "32", "33", "1;31", "2", "1", "7"
+
+
+class Panel:
+    """Live status block pinned to the top of the terminal.
+
+    Log lines (ACKs, events, heartbeats) scroll in the region below it, and
+    commands are typed at the bottom as before. Uses plain ANSI escapes, so
+    it needs no extra packages (Windows Terminal, PowerShell, Linux, macOS).
+    """
+    HEIGHT = 15                       # rows the panel occupies (4 for warnings)
+    STALE_S = 1.5                     # status older than this = link problem
+    STILL_S = 2.0                     # encoder unchanged this long = not turning
+
+    def __init__(self, lock, out=sys.stdout):
+        self.lock, self.out = lock, out       # lock: shared with all printing
+        self.data_lock = threading.Lock()     # guards the fields below
+        self.size = None
+        self.status, self.t_status = None, None
+        self.status_times = deque(maxlen=64)
+        self.enc = deque()            # (time, total_l, total_r), last few seconds
+        self.enc_total = [0, 0]
+        self.prev_line, self.line_changes = None, [0, 0]
+        self.hb, self.reconnects0 = None, None
+        self.online, self.session = None, 0
+        self.last_ack, self.estop_src = None, None
+        self.last_event = None
+
+    # ---- data in (called from the MQTT thread) ----
+    def on_status(self, d, now):
+        prev = self.status
+        self.status, self.t_status = d, now
+        self.status_times.append(now)
+        if prev is not None and "enc_l" in d and "enc_l" in prev:
+            self.enc_total[0] += max(enc_delta(d["enc_l"], prev["enc_l"]), 0)
+            self.enc_total[1] += max(enc_delta(d["enc_r"], prev["enc_r"]), 0)
+        self.enc.append((now, *self.enc_total))
+        while self.enc and now - self.enc[0][0] > self.STILL_S + 1.0:
+            self.enc.popleft()
+        line = d.get("line")
+        if line is not None:
+            if self.prev_line is not None:
+                changed = line ^ self.prev_line
+                self.line_changes[0] += (changed >> 1) & 1
+                self.line_changes[1] += changed & 1
+            self.prev_line = line
+        if not d.get("estop"):
+            self.estop_src = None
+
+    def on_heartbeat(self, d):
+        self.hb = d
+        if self.reconnects0 is None:
+            self.reconnects0 = d["reconnects"]
+
+    def on_online(self, d):
+        self.online, self.session = d["online"], d["session"]
+
+    def on_ack(self, now, name, result, rtt):
+        self.last_ack = (now, name, result, rtt)
+
+    def on_event(self, d, now):
+        self.last_event = (now, d)
+        if d["type"] == "ESTOP":
+            v = d.get("value", 0)
+            self.estop_src = EVT_SRC[v] if v < len(EVT_SRC) else f"source {v}"
+
+    # ---- derived numbers ----
+    def enc_rate(self, side, now, window=1.0):
+        """Encoder edges per second over the last `window` seconds."""
+        recent = [e for e in self.enc if now - e[0] <= window]
+        if len(recent) < 2 or recent[-1][0] - recent[0][0] < 0.3:
+            return None
+        return (recent[-1][1 + side] - recent[0][1 + side]) / (recent[-1][0] - recent[0][0])
+
+    def enc_still(self, side, now):
+        """True if this encoder has not moved for STILL_S seconds."""
+        if not self.enc or now - self.enc[0][0] < self.STILL_S:
+            return False                        # not enough history yet
+        old = [e for e in self.enc if now - e[0] >= self.STILL_S]
+        return bool(old) and self.enc[-1][1 + side] == old[-1][1 + side]
+
+    def status_hz(self, now):
+        t = [x for x in self.status_times if now - x <= 5.0]
+        return (len(t) - 1) / (t[-1] - t[0]) if len(t) >= 3 and t[-1] > t[0] else None
+
+    def checks(self, now):
+        """Plain-language warnings, most serious first: (text, colour)."""
+        w = []
+        s = self.status
+        if self.online is False:
+            w.append(("car is OFFLINE (MQTT last will received)", RED))
+        if s is None:
+            w.append(("waiting for the first status packet from the car", YELLOW))
+            return w
+        age = now - self.t_status
+        if age > self.STALE_S:
+            w.append((f"no status for {age:.0f} s: car off, or Wi-Fi/MQTT dropped", RED))
+        state = VEH_STATE[s["vehicle_state"]] if s["vehicle_state"] < len(VEH_STATE) else "?"
+        faults = s.get("faults", 0) or 0
+        for bit, name in FAULT_BITS.items():
+            if faults & (1 << bit):
+                w.append((f"{name} reports a fault", RED))
+        if faults & ~sum(1 << b for b in FAULT_BITS):
+            w.append((f"unknown fault bits (faults={faults})", RED))
+        if s.get("estop"):
+            src = f" by {self.estop_src}" if self.estop_src else ""
+            w.append((f"E-STOP latched{src}: send 'reset', then 'start'", RED))
+        if s.get("obs_state") == OBS_STATE.index("FAULT"):
+            w.append(("ultrasonic in FAULT: check TRIG/ECHO wires and ECHO divider", RED))
+        elif s.get("obs_cm") == OBS_CM_MAX:
+            w.append(("ultrasonic at max range (511 cm): no echo?", YELLOW))
+        if state in DRIVING:
+            still_l, still_r = self.enc_still(0, now), self.enc_still(1, now)
+            if still_l and still_r:
+                w.append((f"in {state} but neither encoder is counting", RED))
+            elif still_l or still_r:
+                side, other = ("left", "right") if still_l else ("right", "left")
+                w.append((f"{side} encoder not counting while {other} one is "
+                          f"(wheel stuck or encoder wire loose?)", RED))
+        for side in ("l", "r"):
+            if s.get(f"speed_{side}") == SPEED_MAX:
+                name = "left" if side == "l" else "right"
+                w.append((f"{name} speed saturated at {SPEED_MAX} mm/s: "
+                          f"check ticks per wheel turn", YELLOW))
+        if self.hb:
+            link = self.hb["link"]
+            if link < len(LINK_STATE) and LINK_STATE[link] != "ONLINE":
+                w.append((f"link state {LINK_STATE[link]}", YELLOW))
+            extra = self.hb["reconnects"] - (self.reconnects0 or 0)
+            if extra > 0:
+                w.append((f"{extra} reconnect(s) since the dashboard started", YELLOW))
+            if self.hb["rssi_dbm"] and self.hb["rssi_dbm"] < -75:
+                w.append((f"weak Wi-Fi ({self.hb['rssi_dbm']} dBm)", YELLOW))
+        return w
+
+    # ---- drawing ----
+    def render(self, now, cols):
+        """The panel as HEIGHT strings, each at most `cols` visible chars."""
+        s, hb = self.status, self.hb
+        g = (lambda k, dflt="-": dflt if s is None or s.get(k) is None else s[k])
+
+        if self.online is None:
+            online = ("waiting for car", YELLOW)
+        else:
+            online = (("ONLINE" if self.online else "OFFLINE")
+                      + f" 0x{self.session:04X}", GREEN if self.online else RED)
+        title = [(" IS33 car  ", TITLE), (f" {online[0]} ", online[1])]
+        if hb:
+            link = LINK_STATE[hb["link"]] if hb["link"] < len(LINK_STATE) else "?"
+            rssi = "rssi n/a" if hb["rssi_dbm"] == 0 else f"{hb['rssi_dbm']} dBm"
+            title.append((f" link {link} | {rssi} | up {hb['uptime_s']} s", ""))
+        if self.t_status is not None:
+            hz = self.status_hz(now)
+            age = now - self.t_status
+            fresh = hz and age <= self.STALE_S
+            title.append((f" | status {hz:.1f} Hz" if fresh else " | status", ""))
+            title.append((f", {age:.1f} s ago", RED if age > self.STALE_S else ""))
+
+        if s is None:
+            state_seg = [("-", DIM)]
+        else:
+            vs = s["vehicle_state"]
+            name = VEH_STATE[vs] if vs < len(VEH_STATE) else f"?{vs}"
+            colour = RED if name == "SAFE_STOP" else DIM if name in ("INIT", "IDLE") else GREEN
+            state_seg = [(f"{name:<15}", colour + ";1")]
+        if s is not None and s.get("estop"):
+            src = f" ({self.estop_src})" if self.estop_src else ""
+            estop = (f"LATCHED{src}", RED)
+        else:
+            estop = ("off" if s else "-", GREEN if s else DIM)
+
+        faults = g("faults", None)
+        if faults is None:
+            fault_seg = [("-", DIM)]
+        elif faults == 0:
+            fault_seg = [("none", GREEN)]
+        else:
+            names = [n for b, n in FAULT_BITS.items() if faults & (1 << b)]
+            fault_seg = [(", ".join(names) or "unknown", RED), (f"  (faults={faults})", DIM)]
+
+        def wheel(side, label):
+            rate = self.enc_rate(0 if side == "l" else 1, now)
+            rate_txt = "" if rate is None else f" ({rate:+.0f}/s)"
+            spd = g(f"speed_{side}")
+            return [(f"{label} ", BOLD), (f"{spd:>4} mm/s", YELLOW if spd == SPEED_MAX else ""),
+                    (f"  enc {g('enc_' + side):>5}{rate_txt:<10}", "")]
+
+        line = g("line", None)
+        if line is None:
+            line_seg = [("-", DIM)]
+        else:
+            def sensor(name, on, n):
+                return [(f"{name} ", ""), ("[ON ]" if on else "[off]", GREEN if on else DIM),
+                        (f" {n} changes   ", DIM)]
+            line_seg = (sensor("left", line & 2, self.line_changes[0])
+                        + sensor("centre", line & 1, self.line_changes[1]))
+
+        bc = g("barcode", None)
+        bc_txt = "-" if bc is None else BARCODE[bc] if bc < len(BARCODE) else f"?{bc}"
+        pitch = g("pitch", None)
+        pitch_txt = "-" if pitch is None else f"{pitch:+d} deg"
+        os_ = g("obs_state", None)
+        obs_name = "-" if os_ is None else OBS_STATE[os_] if os_ < len(OBS_STATE) else f"?{os_}"
+        obs_cm = g("obs_cm")
+
+        if hb:
+            cmds = (f"ok {hb['cmds_ok']}  rejected {hb['cmds_rej']}  queue full "
+                    f"{hb['queue_full']}  reconnects {hb['reconnects']}")
+        else:
+            cmds = "-"
+        ack = [("", "")]
+        if self.last_ack:
+            t, name, result, rtt = self.last_ack
+            ack = [("   last ACK ", DIM), (f"{name} {result}",
+                    GREEN if result == "ACCEPTED" else RED),
+                   (f" ({rtt}, {now - t:.0f} s ago)", DIM)]
+        ev = [("-", DIM)]
+        if self.last_event:
+            t, d = self.last_event
+            info = {k: v for k, v in d.items() if k not in ("session", "seq", "type")}
+            v = info.get("value")
+            if d["type"] == "ESTOP" and v is not None:
+                info = f" by {EVT_SRC[v] if v < len(EVT_SRC) else v}"
+            elif d["type"] == "BARCODE" and v is not None:
+                info = f" {BARCODE[v] if v < len(BARCODE) else v}"
+            elif d["type"] == "STATE_CHANGE":
+                info = f" {info['from']} -> {info['to']}"
+            else:
+                info = " " + " ".join(f"{k}={x}" for k, x in info.items()) if info else ""
+            ev = [(d["type"], BOLD), (info, ""),
+                  (f"  ({now - t:.0f} s ago)", DIM)]
+
+        rows = [
+            title,
+            [("State     ", DIM)] + state_seg + [("  E-STOP ", DIM), estop],
+            [("Faults    ", DIM)] + fault_seg,
+            [("Wheels    ", DIM)] + wheel("l", "L") + [("|  ", DIM)] + wheel("r", "R"),
+            [("Line      ", DIM)] + line_seg,
+            [("Barcode   ", DIM), (f"{bc_txt:<10}", ""), ("Travel ", DIM),
+             (f"{g('dist_cm')} cm", "")],
+            [("Tilt      ", DIM), (f"pitch {pitch_txt:<9}", ""), ("hump max ", DIM),
+             (f"{g('hump_max_mm')} mm", "")],
+            [("Obstacle  ", DIM), (f"{obs_name:<14}", RED if obs_name == "FAULT" else ""),
+             ("nearest ", DIM), (f"{obs_cm} cm", YELLOW if obs_cm == OBS_CM_MAX else "")],
+            [("Commands  ", DIM), (cmds, "")] + ack,
+            [("Event     ", DIM)] + ev,
+        ]
+        warnings = self.checks(now)
+        n_warn = self.HEIGHT - len(rows) - 1
+        if not warnings:
+            rows.append([("Checks    ", DIM), ("all OK", GREEN)])
+            rows += [[]] * (n_warn - 1)
+        else:
+            shown = warnings[:n_warn]
+            if len(warnings) > n_warn:          # squeeze the rest onto the last row
+                rest = warnings[n_warn - 1:]
+                shown = warnings[:n_warn - 1] + [(" | ".join(t for t, _ in rest),
+                                                  rest[0][1])]
+            for i, (text, colour) in enumerate(shown):
+                rows.append([("Checks    " if i == 0 else "          ", DIM),
+                             ("! " + text, colour)])
+            rows += [[]] * (n_warn - len(shown))
+        rows.append([("-" * cols, DIM)])
+        return [fit(r, cols) for r in rows]
+
+    # ---- terminal handling ----
+    @staticmethod
+    def supported():
+        if not sys.stdout.isatty():
+            return False
+        if os.name == "nt":                    # turn on ANSI escapes in the console
+            try:
+                import ctypes
+                k = ctypes.windll.kernel32
+                h = k.GetStdHandle(-11)
+                mode = ctypes.c_uint32()
+                if not k.GetConsoleMode(h, ctypes.byref(mode)):
+                    return False
+                k.SetConsoleMode(h, mode.value | 0x0004)   # VIRTUAL_TERMINAL_PROCESSING
+            except (OSError, AttributeError):
+                return False
+        rows = shutil.get_terminal_size().lines
+        return rows >= Panel.HEIGHT + 6
+
+    def _set_region(self, size):
+        """Scroll only the rows below the panel; park the cursor at the bottom."""
+        self.size = size
+        self.out.write(f"\x1b[{self.HEIGHT + 1};{size.lines}r\x1b[{size.lines};1H")
+
+    def start(self):
+        with self.lock:
+            self.out.write("\x1b[2J")
+            self._set_region(shutil.get_terminal_size())
+            self.out.flush()
+
+    def draw(self):
+        size = shutil.get_terminal_size()
+        if size.lines < self.HEIGHT + 3:
+            return                              # window too small to draw
+        with self.data_lock:
+            lines = self.render(time.time(), size.columns)
+        with self.lock:
+            if size != self.size:
+                self._set_region(size)
+            buf = ["\x1b7"]                     # save cursor (where you type)
+            for i, text in enumerate(lines, start=1):
+                buf.append(f"\x1b[{i};1H\x1b[2K{text}")
+            buf.append("\x1b8")                 # back to where you were typing
+            self.out.write("".join(buf))
+            self.out.flush()
+
+    def stop(self):
+        with self.lock:
+            self.out.write(f"\x1b[r\x1b[{shutil.get_terminal_size().lines};1H\n")
+            self.out.flush()
+
+
 class Dashboard:
     def __init__(self, args):
         self.args = args
@@ -137,6 +492,9 @@ class Dashboard:
         self.next_seq = 1
         self.sent_at = {}                 # seq -> send time, for round-trip time
         self.lock = threading.Lock()
+        self.out_lock = threading.Lock()  # one writer at a time on the terminal
+        self.panel = Panel(self.out_lock) if args.panel else None
+        self.running = True
         self.log_file = open(args.log, "a", newline="")
         self.log = csv.writer(self.log_file)
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
@@ -144,13 +502,35 @@ class Dashboard:
         self.client.on_connect = self.on_connect
         self.client.on_message = self.on_message
 
+    def say(self, text: str):
+        with self.out_lock:
+            print(text, flush=True)
+
+    def to_panel(self, method: str, *args):
+        """Feed the live panel. A panel bug must never stop the dashboard."""
+        if self.panel is None:
+            return
+        try:
+            with self.panel.data_lock:
+                getattr(self.panel, method)(*args)
+        except Exception as exc:                        # noqa: BLE001
+            self.say(f"[dash] panel error ({method}): {exc!r}")
+
+    def draw_loop(self):
+        while self.running:
+            try:
+                self.panel.draw()
+            except Exception as exc:                    # noqa: BLE001
+                self.say(f"[dash] panel draw error: {exc!r}")
+            time.sleep(0.25)
+
     def write_log(self, kind, payload: bytes, decoded):
         self.log.writerow([f"{time.time():.3f}", kind, payload.hex(),
                            json.dumps(decoded)])
         self.log_file.flush()
 
     def on_connect(self, client, userdata, flags, reason_code, properties):
-        print(f"[dash] connected to broker ({reason_code})")
+        self.say(f"[dash] connected to broker ({reason_code})")
         client.subscribe("is33/car/#", qos=1)
 
     def on_message(self, client, userdata, msg):
@@ -160,7 +540,8 @@ class Dashboard:
                 with self.lock:
                     if d["online"] and d["session"] != self.session:
                         self.session, self.next_seq = d["session"], 1
-                print(f"[online] {'ONLINE' if d['online'] else 'OFFLINE'} "
+                self.to_panel("on_online", d)
+                self.say(f"[online] {'ONLINE' if d['online'] else 'OFFLINE'} "
                       f"session=0x{d['session']:04X}")
             elif msg.topic == T_STATUS:
                 if msg.payload[:1] == b"{":
@@ -168,28 +549,33 @@ class Dashboard:
                     d["vehicle_state"] = d.pop("state", 0)
                 else:
                     d = decode_status(msg.payload)
-                if not self.args.quiet:
-                    print(f"[status] {VEH_STATE[d['vehicle_state']]}"
+                self.to_panel("on_status", d, time.time())
+                if not self.args.quiet and self.panel is None:
+                    self.say(f"[status] {VEH_STATE[d['vehicle_state']]}"
                           f" estop={d.get('estop')} spd={d.get('speed_l')}/{d.get('speed_r')}"
                           f" dist={d.get('dist_cm')}cm pitch={d.get('pitch')}"
                           f" hump={d.get('hump_max_mm')}mm obs={d.get('obs_cm')}cm"
                           f" ({len(msg.payload)} B)")
             elif msg.topic == T_HEARTBEAT:
                 d = decode_heartbeat(msg.payload)
+                self.to_panel("on_heartbeat", d)
                 rssi = "n/a" if d["rssi_dbm"] == 0 else f"{d['rssi_dbm']}dBm"
-                print(f"[heartbeat] up={d['uptime_s']}s rssi={rssi} "
+                self.say(f"[heartbeat] up={d['uptime_s']}s rssi={rssi} "
                       f"link={LINK_STATE[d['link']]} ok={d['cmds_ok']} "
                       f"rej={d['cmds_rej']} qfull={d['queue_full']} "
                       f"reconn={d['reconnects']}")
             elif msg.topic == T_EVENT:
                 d = decode_event(msg.payload)
-                print(f"[EVENT] {d}")
+                self.to_panel("on_event", d, time.time())
+                self.say(f"[EVENT] {d}")
             elif msg.topic == T_ACK:
                 d = decode_ack(msg.payload)
                 sent = self.sent_at.pop(d["cmd_seq"], None)
                 rtt = f"{(time.time() - sent) * 1000:.0f} ms" if sent else "n/a"
                 d["rtt_ms"] = None if sent is None else round((time.time() - sent) * 1000, 1)
-                print(f"[ACK] {CMD_NAME.get(d['cmd'], d['cmd'])} seq={d['cmd_seq']} "
+                self.to_panel("on_ack", time.time(), CMD_NAME.get(d["cmd"], d["cmd"]),
+                              RESULT[d["result"]], rtt)
+                self.say(f"[ACK] {CMD_NAME.get(d['cmd'], d['cmd'])} seq={d['cmd_seq']} "
                       f"-> {RESULT[d['result']]} (round trip {rtt})")
             elif msg.topic == T_CMD:
                 return                                  # our own commands echoed back
@@ -199,10 +585,10 @@ class Dashboard:
         except (ValueError, IndexError, KeyError) as exc:
             text = msg.payload.decode("utf-8", "replace")
             if msg.payload and text.isprintable():
-                print(f"[{msg.topic}] (text) {text}")          # early stages send text
+                self.say(f"[{msg.topic}] (text) {text}")          # early stages send text
                 self.write_log(msg.topic, msg.payload, {"text": text})
             else:
-                print(f"[dash] could not decode {msg.topic}: {exc} ({msg.payload.hex()})")
+                self.say(f"[dash] could not decode {msg.topic}: {exc} ({msg.payload.hex()})")
 
     def send(self, name: str, session=None, seq=None, letters: str = ""):
         with self.lock:
@@ -216,14 +602,17 @@ class Dashboard:
         self.client.publish(T_CMD, payload, qos=1, retain=False)
         self.write_log("sent_cmd", payload, {"cmd": name, "session": session, "seq": seq,
                                              "letters": letters})
-        print(f"[dash] sent {name.upper()} {letters} session=0x{session:04X} seq={seq}")
+        self.say(f"[dash] sent {name.upper()} {letters} session=0x{session:04X} seq={seq}")
 
     def run(self):
+        if self.panel is not None:
+            self.panel.start()
+            threading.Thread(target=self.draw_loop, daemon=True).start()
         self.client.connect(self.args.broker, self.args.port, keepalive=30)
         self.client.loop_start()
         if self.args.clear_retained:
             self.client.publish(T_CMD, b"", qos=1, retain=True)  # wipe any retained cmd
-        print("Commands: start | stop | e (E-STOP) | reset | map FULR (forward, U-turn, "
+        self.say("Commands: start | stop | e (E-STOP) | reset | map FULR (forward, U-turn, "
               "left, right) | stale (old-session START) | replay (repeat last seq) | "
               "burst N (N STARTs fast) | q")
         try:
@@ -240,7 +629,7 @@ class Dashboard:
                     letters = parts[1].upper() if len(parts) > 1 else ""
                     if (len(letters) != 4 or not set(letters) <= MAP_CHARS
                             or len(set(letters)) != 4):
-                        print("map needs 4 different letters/digits, e.g. map FULR")
+                        self.say("map needs 4 different letters/digits, e.g. map FULR")
                     else:
                         self.send("map", letters=letters)
                 elif cmd in ("e", "estop"):
@@ -253,8 +642,13 @@ class Dashboard:
                     for _ in range(int(parts[1]) if len(parts) > 1 else 8):
                         self.send("start")
                 else:
-                    print("unknown command")
+                    self.say("unknown command")
+        except KeyboardInterrupt:
+            pass
         finally:
+            self.running = False
+            if self.panel is not None:
+                self.panel.stop()
             self.client.loop_stop()
             self.client.disconnect()
             self.log_file.close()
@@ -265,10 +659,18 @@ def main():
     p.add_argument("--broker", default="127.0.0.1")
     p.add_argument("--port", type=int, default=1883)
     p.add_argument("--log", default="tlm_log.csv")
-    p.add_argument("--quiet", action="store_true", help="hide 5 Hz status lines")
+    p.add_argument("--quiet", action="store_true",
+                   help="hide 5 Hz status lines (only without the live panel)")
+    p.add_argument("--no-panel", dest="panel", action="store_false",
+                   help="plain scrolling output instead of the live status panel")
     p.add_argument("--clear-retained", action="store_true",
                    help="erase any retained message on the command topic")
-    Dashboard(p.parse_args()).run()
+    args = p.parse_args()
+    if args.panel and not Panel.supported():
+        print("[dash] terminal can't show the live panel (not a console, or under "
+              f"{Panel.HEIGHT + 6} rows); using plain output")
+        args.panel = False
+    Dashboard(args).run()
 
 
 if __name__ == "__main__":

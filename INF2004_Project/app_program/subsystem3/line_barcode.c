@@ -482,8 +482,8 @@ static void line_follow_drive(const LineBarcodeData_t *d, BOOL *line_is_left)
 		if (d->ir_left_raw) {
 			*line_is_left = TRUE;
 		}
-		cmd.left_mm_s = *line_is_left ? 0 : S3_STEER_SPEED_MM_S;
-		cmd.right_mm_s = *line_is_left ? S3_STEER_SPEED_MM_S : 0;
+		cmd.left_mm_s = *line_is_left ? S3_STEER_INNER_MM_S : S3_STEER_SPEED_MM_S;
+		cmd.right_mm_s = *line_is_left ? S3_STEER_SPEED_MM_S : S3_STEER_INNER_MM_S;
 	}
 	(void)b2_submit_command(&cmd);
 }

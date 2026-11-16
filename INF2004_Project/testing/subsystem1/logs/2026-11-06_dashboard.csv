@@ -1,0 +1,5 @@
+1793955896.521,sent_cmd,1100000001,"{""cmd"": ""start"", ""session"": 0, ""seq"": 1, ""letters"": """"}"
+1793956006.786,sent_cmd,1100000002,"{""cmd"": ""start"", ""session"": 0, ""seq"": 2, ""letters"": """"}"
+1793957046.979,sent_cmd,1200000003,"{""cmd"": ""stop"", ""session"": 0, ""seq"": 3, ""letters"": """"}"
+1793957048.939,sent_cmd,1100000004,"{""cmd"": ""start"", ""session"": 0, ""seq"": 4, ""letters"": """"}"
+1793957052.394,sent_cmd,1400000005,"{""cmd"": ""reset"", ""session"": 0, ""seq"": 5, ""letters"": """"}"
