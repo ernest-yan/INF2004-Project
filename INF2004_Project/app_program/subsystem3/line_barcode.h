@@ -126,13 +126,19 @@ MovementAction_t get_action_for_character(char c);
 					   at 115-134 mm/s and overshot) */
 #define S3_STEER_INNER_MM_S	30	/* inner wheel while steering: a curve, not a
 					   pivot (inner = 0 overshot the line, 2026-11-13) */
+#define S3_STEER_HARD_MS	250	/* still steering the same way after this:
+					   inner wheel reverses (tight curves) */
+#define S3_STEER_HARD_MM_S	40	/* reversed inner wheel speed; S2 checks
+					   the encoder for stalls from 40 up */
 #define S3_SCAN_HOLD_MAX_MS	3000	/* drive straight at most this long while
 					   GP16 scans (141 mm barcode = 2 s at 70) */
 #define S3_TURN_SPEED_MM_S	80	/* barcode turns */
 #define S3_TURN_TIMEOUT_MS	6000
 #define S3_JUNCTION_CONFIRM_MS	40	/* both sensors on the line this long */
 #define S3_JUNCTION_ADVANCE_MM	60	/* line sensors to wheel axle: measure */
-#define S3_LINE_LOST_MS		1500	/* search this long, then stop */
+#define S3_LINE_LOST_MS		2500	/* search this long, then stop */
+#define S3_SEARCH_SWAP_MS	300	/* lost: guessed side this long, then the
+					   other side for the rest of the search */
 #define S3_START_DELAY_MS	3000	/* after boot, before the first move */
 
 /*

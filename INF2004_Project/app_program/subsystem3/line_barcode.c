@@ -463,9 +463,9 @@ void process_sensors_distance_packed(uint32_t current_ticks,
  *  sensors (1 = on the line, same active-HIGH logic as above):
  *    centre          on the line: straight (left too = junction: straight)
  *    left only       the line is to the left: steer left
- *    neither         keep steering to the side the line was last seen on
- *                    (from centre-only that is right: the left sensor would
- *                    have seen it otherwise), give up after S3_LINE_LOST_MS
+ *    neither         sweep: first toward the side the last correction turned
+ *                    (curves keep bending that way), after S3_SEARCH_SWAP_MS
+ *                    the other way, give up after S3_LINE_LOST_MS
  *
  *  A decoded barcode is only stored.  Its movement runs at the next
  *  cross-junction (both sensors on the line), after driving on until the
@@ -520,7 +520,21 @@ static void line_follow_drive(const LineBarcodeData_t *d, BOOL *line_is_left)
 {
 	static BOOL hold = FALSE;
 	static uint32_t hold_since = 0u;
+	static BOOL searching = FALSE;
+	static uint32_t search_since = 0u;
+	static uint32_t last_call = 0u;
+	static BOOL turning = FALSE;
+	static BOOL last_go_left = FALSE;
+	static uint32_t steer_since = 0u;
 	b2_command_t cmd = {0};
+
+	/* Not called for a while (stopped, junction turn): start fresh. */
+	if ((uint32_t)(app_time_us_32() - last_call) >
+	    (10u * S3_FOLLOW_PERIOD_MS * 1000u)) {
+		searching = FALSE;
+		turning = FALSE;
+	}
+	last_call = app_time_us_32();
 
 	/* Hold straight while a barcode is being scanned: the barcode sensor is
 	   on the right, so steering would change its speed mid-scan and stretch
@@ -541,15 +555,56 @@ static void line_follow_drive(const LineBarcodeData_t *d, BOOL *line_is_left)
 		cmd.left_mm_s = S3_LINE_SPEED_MM_S;
 		cmd.right_mm_s = S3_LINE_SPEED_MM_S;
 	} else if (d->ir_center_raw) {
-		*line_is_left = FALSE;
+		/* Curve memory: if a turn just brought the line back, it most
+		   likely bends that way, so search that side first next time. */
+		if (turning) {
+			*line_is_left = last_go_left;
+			turning = FALSE;
+		}
 		cmd.left_mm_s = S3_LINE_SPEED_MM_S;
 		cmd.right_mm_s = S3_LINE_SPEED_MM_S;
 	} else {
+		BOOL go_left = *line_is_left;
+
 		if (d->ir_left_raw) {
 			*line_is_left = TRUE;
+			go_left = TRUE;
+			searching = FALSE;
+		} else {
+			/* Neither sensor: the side is only a guess (the line can sit
+			   in the gap between the left and centre sensors), so sweep:
+			   the guessed side first, then back past the start the other
+			   way until S3_LINE_LOST_MS. */
+			if (!searching) {
+				searching = TRUE;
+				search_since = app_time_us_32();
+			}
+			if ((uint32_t)(app_time_us_32() - search_since) >=
+			    (S3_SEARCH_SWAP_MS * 1000u)) {
+				go_left = !*line_is_left;
+			}
 		}
-		cmd.left_mm_s = *line_is_left ? S3_STEER_INNER_MM_S : S3_STEER_SPEED_MM_S;
-		cmd.right_mm_s = *line_is_left ? S3_STEER_SPEED_MM_S : S3_STEER_INNER_MM_S;
+		/* Gentle arc first; if the centre has not found the line again
+		   soon, reverse the inner wheel and spin almost on the spot, for
+		   curves tighter than the arc (~16 cm radius) and for searching
+		   without driving away from the line. */
+		{
+			int16_t inner = S3_STEER_INNER_MM_S;
+
+			if (!turning || (go_left != last_go_left)) {
+				steer_since = app_time_us_32();
+			} else if ((uint32_t)(app_time_us_32() - steer_since) >=
+				   (S3_STEER_HARD_MS * 1000u)) {
+				inner = -S3_STEER_HARD_MM_S;
+			}
+			cmd.left_mm_s = go_left ? inner : S3_STEER_SPEED_MM_S;
+			cmd.right_mm_s = go_left ? S3_STEER_SPEED_MM_S : inner;
+		}
+		turning = TRUE;
+		last_go_left = go_left;
+	}
+	if (d->ir_center_raw) {
+		searching = FALSE;
 	}
 	(void)b2_submit_command(&cmd);
 }
