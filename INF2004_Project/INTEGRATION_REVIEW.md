@@ -70,7 +70,7 @@ obstacle bypass is in `subsystem5/ultrasonic.c` (`APP_MISSION_ENABLE` in
 IF-15 to IF-18):
 - the letter -> movement mapping over MQTT (dashboard `map FULR`) calls
   `set_mqtt_action_mapping()`; `S3_BENCH_MAPPING` is now 0,
-- remote RESET, the operator reset path for a latched S2 brake / S4 impact /
+- remote RESET, the operator reset path for a latched S2 brake / S4 lift /
   S5 fault (refused while the wheels move),
 - remote START / STOP: in `MQTT=1` images the robot now waits for START
   before line following (`s1_mission_go()` in S3's `line_follow_allowed()`).
