@@ -1,6 +1,6 @@
 # Change Requirement 1: data representation table
 
-**Status:** v2, 2026-11-18. Decisions D1–D6 approved. Checked against the Project Write-up, the Project Briefing and the IMU change notice (see the end of this file).
+**Status:** v3, implemented 2026-11-18 on branch `cr1/min-bit`. Decisions D1–D6 approved. Checked against the Project Write-up, the Project Briefing and the IMU change notice. The "After" columns below were planning estimates; the **measured** sizes are in [CR1_REPORT.md](CR1_REPORT.md), and the differences from the plan are listed in "As implemented" at the end of this file.
 
 This table lists each piece of application data in S1–S5, its valid range, the minimum bits it needs, and how it will be stored.
 "Before" sizes come from [BASELINE.md](BASELINE.md). "After" sizes are estimates for now; step 5 replaces them with measured values.
@@ -235,7 +235,7 @@ Per the IMU change notice, S4 detects **lifted / overturned** (not collisions) a
 
 ---
 
-## Expected totals (estimates, measured in step 5)
+## Expected totals (planning estimates; measured values in CR1_REPORT.md)
 
 | | Before | After (est.) |
 |---|---:|---:|
@@ -275,3 +275,26 @@ Packing must not drop or narrow any data the specification asks for.
 | Avoidance plan: stop, continue, turn left/right, reverse and reattempt (Write-up, Buddy 5) | S5 state + candidate side | Yes: 8 states (3 bits), 3 sides (2 bits) |
 | C, micro T-Kernel, Barr C coding standard (Write-up overview) | all | Yes: R10 |
 | Resource efficiency (Write-up, assessment) | all | This change requirement |
+
+---
+
+## As implemented: differences from the plan
+
+| Item | Plan | Implemented | Why |
+|---|---|---|---|
+| App static RAM | ≈ 1,150 B | **1,122 B** (measured) | |
+| `b2_command_t` | packed, ≈ 10 B | Caller's request keeps plain types (14 B, on the caller's stack). The **shared mailbox** is packed to **8 B**. | A request is range-checked before packing, so an out-of-range value (e.g. 10,000 mm/s) is refused instead of silently truncated by a bit-field. |
+| S2 goal timeout | `uint16_t` ms | 10-bit field in 10 ms units (≤ 10.23 s, rounded up) | Fits the 8-byte mailbox. The longest timeout in use is 6 s. |
+| S2 PI integral | `int32_t` | `int16_t` | Clamped to ±8000 by the controller. |
+| `S1_CMD` | ≈ 10 B | Unchanged, 12 B | 75 bits of data need 10 B; 4-byte alignment and the kernel's 4-byte message slots make it 12/16 B either way. |
+| Barcode letters | 6-bit Code 39 symbol | 6-bit code: 0 = none, 1–26 = A–Z, 27–36 = 0–9 | The decoder only outputs A–Z, and the same code holds the MQTT map letters (A–Z, 0–9). |
+| `b4_status_t.yaw_rate_dps` | 9-bit offset field | `int16_t` | Written on every 100 Hz sample outside the lock; a packed field would need the lock on every sample. |
+| `b4_status_t.calibration_progress` | 7-bit field | `uint8_t` | Same reason (100 Hz path). |
+| `b4_terrain_t` | ≈ 40 B | 40 B | Floats unchanged (D4). |
+| S4 control fields | bit-fields | bit-fields, **every write under `s_lock`** | The remote RESET writes them from S1's task. |
+| `subsystem5_status_t` fault | bitmask | bitmask, plus `subsystem5_first_fault()` for the unchanged 3-bit MQTT field | D5: wire format unchanged. |
+| S5 command flags (`s_stopped_confirmed`, …) | flags byte | one byte each (unchanged) | Written by other tasks; a byte store needs no lock, a shared bit-field byte would. Saves only 3 B. |
+| S5 small counters | unchanged | unchanged | As planned. |
+| System fault bitmask | `uint16_t app_fault_mask` with set/clear under a lock | `system_fault_mask()` builds the same 16 bits on demand from each subsystem's fault bitmask | No second copy of the faults to keep in step, and no writer, so no lock. The bit layout is the table above (`SYS_FLT_*` in `team_interfaces.h`). |
+| `vehicle_event_t` | 8 B | 8 B | 53 bits of data; 8 B once aligned. |
+
