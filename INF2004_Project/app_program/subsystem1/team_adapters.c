@@ -256,7 +256,7 @@ void line_get_status(line_status_t *p_out)
 	/* S3's counter (not scanned_char, which lasts one poll, and not
 	 * mbf_barcode, which belongs to line_follow_task). */
 	p_out->barcode_count = d.barcode_count;
-	p_out->last_barcode  = barcode_cmd(d.last_char);
+	p_out->last_barcode  = barcode_cmd(s3_code_to_char(d.last_code));
 }
 
 void imu_get_status(imu_status_t *p_out)

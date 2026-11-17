@@ -49,11 +49,31 @@ typedef enum {
     MOVE_UTURN
 } MovementAction_t;
 
+/* CR1: 6-bit character code for barcode letters and the MQTT map letters:
+ * 0 = none, 1..26 = 'A'..'Z', 27..36 = '0'..'9' (37 values). */
+#define S3_CODE_NONE    (0U)
+#define S3_CODE_BITS    (6U)
+
+static inline uint8_t s3_char_to_code(char c)
+{
+    if ((c >= 'A') && (c <= 'Z')) { return (uint8_t)((uint8_t)(c - 'A') + 1U); }
+    if ((c >= '0') && (c <= '9')) { return (uint8_t)((uint8_t)(c - '0') + 27U); }
+    return S3_CODE_NONE;
+}
+
+static inline char s3_code_to_char(uint32_t code)
+{
+    if ((code >= 1U) && (code <= 26U))  { return (char)('A' + (code - 1U)); }
+    if ((code >= 27U) && (code <= 36U)) { return (char)('0' + (code - 27U)); }
+    return '\0';
+}
+
 /*
  * Compact public data structure from the original project.
- * scanned_char is set for ONE process call when a new character is decoded.
- * S1: barcode_count / last_char keep it for readers that poll slowly
+ * scanned_code is set for ONE process call when a new character is decoded.
+ * S1: barcode_count / last_code keep it for readers that poll slowly
  * (S1 telemetry at 5 Hz), without taking it from mbf_barcode.
+ * CR1: 6 -> 4 bytes. Read the letters with s3_code_to_char().
  */
 typedef struct __attribute__((packed)) {
     uint8_t line_detected  : 1;
@@ -61,11 +81,13 @@ typedef struct __attribute__((packed)) {
     uint8_t ir_left_raw    : 1;
     uint8_t ir_center_raw  : 1;
     uint8_t ir_right_raw   : 1;
-    uint8_t reserved       : 3;
-    char scanned_char;
-    uint8_t fault_mask;
-    uint16_t barcode_count; /* S1: +1 per decoded character, wraps */
-    char last_char;         /* S1: newest decoded character, '\0' = none yet */
+    uint8_t fault_mask     : 1; /* bit 0 = FAULT_LINE_LOSS (only fault) */
+    uint8_t                : 2;
+    uint8_t scanned_code   : 6; /* S3_CODE, this call only */
+    uint8_t                : 2;
+    uint8_t last_code      : 6; /* S1: newest decoded letter, NONE = none yet */
+    uint8_t                : 2;
+    uint8_t barcode_count;      /* S1: +1 per decoded character, wraps */
 } LineBarcodeData_t;
 
 /* Create the kernel mutex that protects the shared data.  Call ONCE from
