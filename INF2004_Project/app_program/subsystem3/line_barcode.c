@@ -526,6 +526,8 @@ static void line_follow_drive(const LineBarcodeData_t *d, BOOL *line_is_left)
 	static BOOL turning = FALSE;
 	static BOOL last_go_left = FALSE;
 	static uint32_t steer_since = 0u;
+	static BOOL exiting = FALSE;
+	static uint32_t exit_since = 0u;
 	b2_command_t cmd = {0};
 
 	/* Not called for a while (stopped, junction turn): start fresh. */
@@ -533,14 +535,18 @@ static void line_follow_drive(const LineBarcodeData_t *d, BOOL *line_is_left)
 	    (10u * S3_FOLLOW_PERIOD_MS * 1000u)) {
 		searching = FALSE;
 		turning = FALSE;
+		exiting = FALSE;
 	}
 	last_call = app_time_us_32();
 
 	/* Hold straight while a barcode is being scanned: the barcode sensor is
 	   on the right, so steering would change its speed mid-scan and stretch
 	   some bars (inner wheel ~0 mm/s), and the letter would not decode.
-	   Capped so stray GP16 edges cannot lock the steering. */
-	if (g_scan_active) {
+	   Capped so stray GP16 edges cannot lock the steering.
+	   Only while the centre sensor is still on the line: on a right-hand
+	   curve the line itself passes under GP16, and holding straight then
+	   drives the car off the curve. */
+	if (g_scan_active && d->ir_center_raw) {
 		if (!hold) {
 			hold = TRUE;
 			hold_since = app_time_us_32();
@@ -555,20 +561,50 @@ static void line_follow_drive(const LineBarcodeData_t *d, BOOL *line_is_left)
 		cmd.left_mm_s = S3_LINE_SPEED_MM_S;
 		cmd.right_mm_s = S3_LINE_SPEED_MM_S;
 	} else if (d->ir_center_raw) {
-		/* Curve memory: if a turn just brought the line back, it most
-		   likely bends that way, so search that side first next time. */
+		/* If the line now leaves the centre and the left sensor does not
+		   see it, it went right (or the car crossed it while turning
+		   left), so the next search starts to the right.  The older
+		   "search the last turn side first" memory was tuned with GP2/GP4
+		   crossed; with correct wiring it searched the wrong way after
+		   every overshoot (2026-11-16 19:44 log: left/right sweeps for
+		   10 s with the centre never settling on the line). */
+		*line_is_left = FALSE;
 		if (turning) {
-			*line_is_left = last_go_left;
 			turning = FALSE;
+			exiting = TRUE;
+			exit_since = app_time_us_32();
 		}
-		cmd.left_mm_s = S3_LINE_SPEED_MM_S;
-		cmd.right_mm_s = S3_LINE_SPEED_MM_S;
+		/* Soft exit: on a curve the line keeps bending, so snapping to
+		   straight the moment the centre finds it makes the car leave the
+		   line again on the same side (straight/steer/straight zig-zag).
+		   Keep a gentle arc the same way for S3_STEER_EXIT_MS, unless the
+		   sensor on the other side sees the line (overshot: go straight). */
+		if (exiting &&
+		    ((uint32_t)(app_time_us_32() - exit_since) <
+		     (S3_STEER_EXIT_MS * 1000u)) &&
+		    !(last_go_left ? d->ir_right_raw : d->ir_left_raw)) {
+			cmd.left_mm_s = last_go_left ? S3_STEER_EXIT_INNER_MM_S
+						     : S3_LINE_SPEED_MM_S;
+			cmd.right_mm_s = last_go_left ? S3_LINE_SPEED_MM_S
+						      : S3_STEER_EXIT_INNER_MM_S;
+		} else {
+			exiting = FALSE;
+			cmd.left_mm_s = S3_LINE_SPEED_MM_S;
+			cmd.right_mm_s = S3_LINE_SPEED_MM_S;
+		}
 	} else {
+		exiting = FALSE;
 		BOOL go_left = *line_is_left;
 
 		if (d->ir_left_raw) {
 			*line_is_left = TRUE;
 			go_left = TRUE;
+			searching = FALSE;
+		} else if (d->ir_right_raw) {
+			/* Centre lost and GP16 (right of the centre) sees black:
+			   the line has bent right under the barcode sensor. */
+			*line_is_left = FALSE;
+			go_left = FALSE;
 			searching = FALSE;
 		} else {
 			/* Neither sensor: the side is only a guess (the line can sit

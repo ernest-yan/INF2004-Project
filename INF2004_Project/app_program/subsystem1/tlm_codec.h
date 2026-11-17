@@ -19,7 +19,7 @@
 
 /* Encoded frame sizes in bytes (bits rounded up to whole bytes). */
 #define TLM_ONLINE_LEN          (3u)    /*  24 bits */
-#define TLM_STATUS_LEN          (17u)   /* 136 bits */
+#define TLM_STATUS_LEN          (21u)   /* 163 bits */
 #define TLM_HEARTBEAT_LEN       (11u)   /*  86 bits */
 #define TLM_ACK_LEN             (7u)    /*  52 bits */
 #define TLM_EVENT_MAX_LEN       (10u)   /*  78 bits, obstacle profile */
@@ -34,7 +34,7 @@ typedef enum
     TLM_CMD_START = 1,
     TLM_CMD_STOP  = 2,
     TLM_CMD_ESTOP = 3,
-    TLM_CMD_RESET = 4,  /* clear brake / impact / S5 fault, only when still */
+    TLM_CMD_RESET = 4,  /* clear brake / S4 lift / S5 fault, only when still */
     TLM_CMD_MAP   = 5   /* barcode letter -> movement mapping (map[]) */
 } tlm_cmd_code_t;
 
@@ -77,6 +77,11 @@ typedef struct
     uint8_t  obstacle_state;    /* 3 bits */
     uint16_t obstacle_cm;       /* 9 bits, 0..511, saturates */
     uint8_t  fault_mask;        /* 8 bits */
+    /* Appended at the end so older decoders still read the fields above. */
+    int16_t  yaw_dps;           /* 9 bits, -256..255, sent as value + 256 */
+    uint8_t  motion;            /* 3 bits, b4_motion_t */
+    uint16_t up_speed_mm_s;     /* 8 bits, sent as value / 4: 0..1020 mm/s */
+    uint8_t  tilt_deg;          /* 7 bits, 0..127, saturates */
 } tlm_status_t;
 
 /* ---------- Heartbeat frame (car -> dashboard, 1 Hz) ---------- */
@@ -98,9 +103,9 @@ typedef enum
 {
     TLM_EVT_STATE_CHANGE = 1,   /* a = old state, b = new state       */
     TLM_EVT_BARCODE      = 2,   /* a = barcode command                */
-    TLM_EVT_HUMP_PEAK    = 3,   /* a = new max height (mm)            */
+    TLM_EVT_HUMP         = 3,   /* a = height of a completed hump (mm) */
     TLM_EVT_OBSTACLE     = 4,   /* uses the obs_* fields              */
-    TLM_EVT_IMPACT       = 5,   /* no payload                         */
+    TLM_EVT_LIFTED       = 5,   /* a = cause: 1 lifted, 2 overturned  */
     TLM_EVT_ESTOP        = 6    /* a = source                         */
 } tlm_event_type_t;
 

@@ -118,7 +118,7 @@ EXPORT void subsystem1_test(void)
 	/* --- frame sizes (Minimum-Bit) ----------------------------------- */
 	s.speed_r_mm_s = 5000u;			/* too big: must clamp, not overflow */
 	TEST_CHECK("S1-U09", tlm_encode_status(&s, buf, sizeof(buf)) == TLM_STATUS_LEN,
-		   "STATUS frame is 17 bytes");
+		   "STATUS frame is 21 bytes");
 	TEST_CHECK("S1-U10", tlm_encode_status(&s, buf, 10u) == 0u,
 		   "encoder refuses a too-small buffer");
 

@@ -1,4 +1,8 @@
-/* IS33 Buddy 4. LSM303DLHC accelerometer; NO GYROSCOPE on this device. */
+/* IS33 Buddy 4. LSM303DLHC accelerometer; NO GYROSCOPE on this device.
+ * Detects: lifted / overturned (-> brake, latched), hump height profile,
+ * turn rate (from S2 wheel speeds) and a motion class.
+ * Impact (collision) detection was removed on instruction: obstacle
+ * avoidance means the robot must not collide in the first place. */
 #include "imu.h"
 #include "mathf.h"   /* PORT: replaces <math.h> (no libm linked) */
 /* PORT: no Pico SDK in this firmware.  I2C goes through drv_i2c1 (I2C1 on
@@ -18,10 +22,11 @@ static app_lock_t s_lock;
 #define B4_CTRL1_100HZ_XYZ     (0x57U)
 #define B4_CTRL4_BDU_HR_2G     (0x88U)
 #define B4_I2C_TIMEOUT_US      (2000U)
-#define B4_GRAVITY_MG          (1000.0f)
 #define B4_MAX_READING_MG      (2100.0f)
 #define B4_PI                  (3.14159265f)
 #define B4_MAX_TRAVEL_STEP_MM  (100U)
+#define B4_CAL_SPREAD_MG       (100.0f) /* |a| range allowed while calibrating */
+#define B4_MOTION_HOLD         (20U)    /* 200 ms before a new motion class */
 static b4_config_t s_cfg;
 static b4_status_t s_status;
 static b4_terrain_t s_terrain;
@@ -31,25 +36,23 @@ static void *s_context;
 static bool s_ready;
 static float s_cal_pitch_sum;
 static float s_cal_pitch_offset;
-static float s_cal_magnitude_sum;
-static float s_magnitude_offset;
 static float s_pitch_filtered;
 static uint32_t s_travel_mm;
 static uint32_t s_prev_travel_mm;
 static uint8_t s_i2c_consecutive;
-static uint8_t s_impact_consecutive;
+static float s_cal_x_sum, s_cal_y_sum, s_cal_z_sum;
+static float s_cal_mag_min, s_cal_mag_max;
+static b4_posture_t s_posture;
+static int32_t s_left_mm_s, s_right_mm_s;
+static b4_motion_t s_motion_candidate;
+static uint8_t s_motion_count;
+static uint8_t s_recent_age;
 
 static int16_t b4_float_to_i16(float f)
 {
     if (f > 32767.0f) { return 32767; }
     if (f < -32768.0f) { return -32768; }
     return (int16_t)f;
-}
-static uint16_t b4_float_to_u16(float f)
-{
-    if (f <= 0.0f) { return 0U; }
-    if (f > 65535.0f) { return 65535U; }
-    return (uint16_t)f;
 }
 static bool b4_register_write(uint8_t reg, uint8_t value)
 {
@@ -80,18 +83,51 @@ static void b4_publish(b4_event_t event)
     {
         s_status.fault = B4_FAULT_QUEUE_FULL;
         s_status.state = B4_STATE_FAULT;
-        s_status.impact_latched = 1U;
         if (s_urgent != NULL) { s_urgent(s_context); }
     }
 }
+/* Sensor fault: S4 can no longer see a lift, so stop the motors too. */
 static void b4_fault(b4_fault_t fault)
 {
     s_status.state = B4_STATE_FAULT;
     s_status.fault = fault;
-    s_status.impact_latched = 1U;
     if (s_urgent != NULL) { s_urgent(s_context); }
-    const b4_event_t ev = {B4_EVENT_SENSOR_FAULT, 0U, 0U, fault};
+    const b4_event_t ev = {B4_EVENT_SENSOR_FAULT, 0U, B4_LIFT_NONE, fault};
     b4_publish(ev);
+}
+static void b4_calibration_restart(void)
+{
+    s_status.calibration_progress = 0U;
+    s_status.calibration_ready = 0U;
+    s_cal_pitch_sum = 0.0f;
+    s_cal_x_sum = 0.0f;
+    s_cal_y_sum = 0.0f;
+    s_cal_z_sum = 0.0f;
+    s_cal_mag_min = 1.0e9f;
+    s_cal_mag_max = 0.0f;
+}
+static void b4_set_motion(b4_motion_t m, bool immediate)
+{
+    if (immediate)
+    {
+        s_status.motion = m;
+        s_motion_candidate = m;
+        s_motion_count = B4_MOTION_HOLD;
+        return;
+    }
+    if (m != s_motion_candidate)
+    {
+        s_motion_candidate = m;
+        s_motion_count = 0U;
+    }
+    if (s_motion_count < B4_MOTION_HOLD)
+    {
+        s_motion_count++;
+    }
+    if (s_motion_count >= B4_MOTION_HOLD)
+    {
+        s_status.motion = m;
+    }
 }
 bool b4_init(const b4_config_t *cfg, b4_event_publish_fn publish,
              b4_urgent_brake_fn urgent, void *ctx)
@@ -100,7 +136,12 @@ bool b4_init(const b4_config_t *cfg, b4_event_publish_fn publish,
         ((cfg->i2c_addr != 0x18U) && (cfg->i2c_addr != 0x19U)) ||
         ((cfg->i2c_speed_khz != 100U) && (cfg->i2c_speed_khz != 400U)) ||
         (cfg->calibration_samples < 20U) || (cfg->calibration_samples > 100U) ||
-        (cfg->impact_threshold_mg < 200U))
+        (cfg->lift_accel_mg < 100U) ||
+        (cfg->lift_speed_mm_s < 50U) ||
+        (cfg->lift_tilt_deg < 10U) ||
+        (cfg->overturn_tilt_deg <= cfg->lift_tilt_deg) ||
+        (cfg->overturn_tilt_deg > 170U) ||
+        (cfg->wheel_track_mm == 0U))
     {
         return false;
     }
@@ -115,16 +156,19 @@ bool b4_init(const b4_config_t *cfg, b4_event_publish_fn publish,
     }
     APP_LOCK_INIT(s_lock);
     s_status.state = B4_STATE_CALIBRATE;
+    s_status.motion = B4_MOTION_CALIBRATING;
+    s_status.lift_cause = B4_LIFT_NONE;
     b4_terrain_init(&s_terrain);
-    s_cal_pitch_sum = 0.0f;
-    s_cal_magnitude_sum = 0.0f;
+    b4_calibration_restart();
     s_cal_pitch_offset = 0.0f;
-    s_magnitude_offset = 1000.0f;
     s_pitch_filtered = 0.0f;
     s_travel_mm = 0U;
     s_prev_travel_mm = 0U;
+    s_left_mm_s = 0;
+    s_right_mm_s = 0;
     s_i2c_consecutive = 0U;
-    s_impact_consecutive = 0U;
+    s_motion_candidate = B4_MOTION_CALIBRATING;
+    s_motion_count = 0U;
     /* PORT: replaces the SDK I2C init, pin function and pull-up calls */
     (void)drv_i2c1_init(B4_I2C_SDA_GPIO, B4_I2C_SCL_GPIO,
                         (uint32_t)cfg->i2c_speed_khz * 1000U);
@@ -147,10 +191,49 @@ void b4_update_travel_mm(uint32_t cumulative_mm)
     }
     app_unlock(&s_lock, irq);
 }
+void b4_update_wheel_speeds(int32_t left_mm_s, int32_t right_mm_s)
+{
+    const UINT irq = app_lock(&s_lock);
+    s_left_mm_s = left_mm_s;
+    s_right_mm_s = right_mm_s;
+    app_unlock(&s_lock, irq);
+}
+/* Calibration: the robot must be still. Collect the mean acceleration
+   vector (= "up" for lift/overturn) and the mean pitch. If |a| varies by
+   more than B4_CAL_SPREAD_MG the robot moved: start again. */
+static void b4_calibrate_sample(float fx, float fy, float fz,
+                                float magnitude, float measured_pitch)
+{
+    if (magnitude < s_cal_mag_min) { s_cal_mag_min = magnitude; }
+    if (magnitude > s_cal_mag_max) { s_cal_mag_max = magnitude; }
+    if ((s_cal_mag_max - s_cal_mag_min) > B4_CAL_SPREAD_MG)
+    {
+        s_status.calibration_restarts++;
+        b4_calibration_restart();
+        return;
+    }
+    s_cal_pitch_sum += measured_pitch;
+    s_cal_x_sum += fx;
+    s_cal_y_sum += fy;
+    s_cal_z_sum += fz;
+    s_status.calibration_progress++;
+    if (s_status.calibration_progress >= s_cfg.calibration_samples)
+    {
+        const float n = (float)s_cfg.calibration_samples;
+        s_cal_pitch_offset = s_cal_pitch_sum / n;
+        b4_posture_init(&s_posture, s_cal_x_sum / n, s_cal_y_sum / n,
+                        s_cal_z_sum / n);
+        s_pitch_filtered = 0.0f;
+        s_status.peak_up_speed_mm_s = 0;
+        s_status.peak_tilt_cdeg = 0U;
+        s_status.calibration_ready = 1U;
+        s_status.state = B4_STATE_MONITOR;
+        b4_set_motion(B4_MOTION_STATIONARY, true);
+    }
+}
 void b4_poll(void)
 {
-    if ((!s_ready) || (s_status.state == B4_STATE_FAULT) ||
-        (s_status.state == B4_STATE_IMPACT))
+    if ((!s_ready) || (s_status.state == B4_STATE_FAULT))
     {
         return;
     }
@@ -185,62 +268,99 @@ void b4_poll(void)
     s_status.last_sample_us = app_time_us_64();
     if (s_status.state == B4_STATE_CALIBRATE)
     {
-        s_cal_pitch_sum += measured_pitch;
-        s_cal_magnitude_sum += magnitude;
-        s_status.calibration_progress++;
-        if (s_status.calibration_progress >= s_cfg.calibration_samples)
-        {
-            s_cal_pitch_offset = s_cal_pitch_sum /
-                                  (float)s_cfg.calibration_samples;
-            s_magnitude_offset = s_cal_magnitude_sum /
-                                  (float)s_cfg.calibration_samples;
-            s_status.calibration_ready = 1U;
-            s_status.state = B4_STATE_MONITOR;
-        }
+        b4_calibrate_sample(fx, fy, fz, magnitude, measured_pitch);
         return;
     }
     const float relative_pitch = measured_pitch - s_cal_pitch_offset;
     s_pitch_filtered = s_pitch_filtered * 0.8f + relative_pitch * 0.2f;
     s_status.pitch_cdeg = b4_float_to_i16(s_pitch_filtered * 100.0f);
-    float deviation = b4_fabsf(magnitude - s_magnitude_offset);
-    if (deviation > 65535.0f) { deviation = 65535.0f; }
-    /* Single very large hit or two threshold crossings: provisional tuning. */
-    if (deviation > ((float)s_cfg.impact_threshold_mg))
-    {
-        s_impact_consecutive++;
+
+    /* ---- lifted / overturned ---------------------------------------- */
+    const b4_posture_cfg_t pcfg = {s_cfg.lift_accel_mg,
+                                   s_cfg.lift_speed_mm_s,
+                                   s_cfg.lift_tilt_deg,
+                                   s_cfg.overturn_tilt_deg};
+    const b4_lift_cause_t cause = b4_posture_update(&s_posture, &pcfg,
+                                                    fx, fy, fz);
+    s_status.tilt_cdeg = (uint16_t)(s_posture.tilt_deg * 100.0f);
+    {   /* peak-hold for 0.3 s so the 5 Hz telemetry cannot miss a spike */
+        const int16_t up_now = b4_float_to_i16(s_posture.up_speed_mm_s);
+        if ((up_now >= s_status.recent_up_speed_mm_s) || (s_recent_age >= 30U))
+        {
+            s_status.recent_up_speed_mm_s = up_now;
+            s_recent_age = 0U;
+        }
+        else
+        {
+            s_recent_age++;
+        }
     }
-    else
+    if ((s_status.state == B4_STATE_MONITOR) && (cause == B4_LIFT_NONE))
     {
-        s_impact_consecutive = 0U;
+        const int16_t up = b4_float_to_i16(s_posture.up_speed_mm_s);
+        if (up > s_status.peak_up_speed_mm_s)
+        {
+            s_status.peak_up_speed_mm_s = up;
+        }
+        if (s_status.tilt_cdeg > s_status.peak_tilt_cdeg)
+        {
+            s_status.peak_tilt_cdeg = s_status.tilt_cdeg;
+        }
     }
-    if ((s_impact_consecutive >= 2U) ||
-        (deviation > (2.0f * (float)s_cfg.impact_threshold_mg)))
+    if (s_status.state == B4_STATE_LIFTED)
     {
-        s_status.state = B4_STATE_IMPACT;
-        s_status.impact_latched = 1U;
+        /* Already braked. A lift that ends upside down is reported as
+           OVERTURNED (the more specific cause); never downgraded. */
+        if ((cause == B4_LIFT_OVERTURNED) &&
+            (s_status.lift_cause != B4_LIFT_OVERTURNED))
+        {
+            s_status.lift_cause = B4_LIFT_OVERTURNED;
+            b4_set_motion(B4_MOTION_OVERTURNED, true);
+        }
+        return;
+    }
+    if (cause != B4_LIFT_NONE)
+    {
+        s_status.state = B4_STATE_LIFTED;
+        s_status.lift_latched = 1U;
+        s_status.lift_cause = cause;
         if (s_urgent != NULL) { s_urgent(s_context); }
-        const b4_event_t ev = {B4_EVENT_IMPACT, 0U,
-                                   b4_float_to_u16(deviation), B4_FAULT_NONE};
+        b4_set_motion((cause == B4_LIFT_OVERTURNED) ? B4_MOTION_OVERTURNED
+                                                    : B4_MOTION_LIFTED, true);
+        const b4_event_t ev = {B4_EVENT_LIFTED, 0U, cause, B4_FAULT_NONE};
         b4_publish(ev);
         return;
     }
+
+    /* ---- hump profile ------------------------------------------------ */
     uint32_t travel_now;
+    int32_t left_mm_s, right_mm_s;
     const UINT irq = app_lock(&s_lock);
     travel_now = s_travel_mm;
+    left_mm_s = s_left_mm_s;
+    right_mm_s = s_right_mm_s;
     app_unlock(&s_lock, irq);
     const uint32_t step_mm = travel_now - s_prev_travel_mm;
     s_prev_travel_mm = travel_now;
     const uint32_t safe_step = (step_mm <= B4_MAX_TRAVEL_STEP_MM) ? step_mm : 0U;
     if (b4_terrain_update(&s_terrain, s_pitch_filtered, safe_step))
     {
+        s_status.hump_count++;
         const b4_event_t ev = {B4_EVENT_HUMP_COMPLETE,
-            s_terrain.last_peak_mm, 0U, B4_FAULT_NONE};
+            s_terrain.last_peak_mm, B4_LIFT_NONE, B4_FAULT_NONE};
         b4_publish(ev);
     }
     s_status.last_hump_height_mm = s_terrain.last_peak_mm;
     s_status.current_peak_mm = s_terrain.peak_mm;
     s_status.max_hump_height_mm = s_terrain.max_peak_mm;
     s_status.terrain_phase = s_terrain.phase;
+
+    /* ---- turn rate and motion class ---------------------------------- */
+    const float yaw = b4_yaw_rate_dps(left_mm_s, right_mm_s,
+                                      s_cfg.wheel_track_mm);
+    s_status.yaw_rate_dps = b4_float_to_i16(yaw);
+    b4_set_motion(b4_classify_motion(true, B4_LIFT_NONE, s_terrain.phase,
+                                     left_mm_s, right_mm_s, yaw), false);
 }
 void b4_get_status(b4_status_t *out)
 {
@@ -257,12 +377,12 @@ bool b4_authorized_reset_while_stopped(void)
     const UINT irq = app_lock(&s_lock);
     s_status.fault = B4_FAULT_NONE;
     s_status.state = B4_STATE_CALIBRATE;
-    s_status.impact_latched = 0U;
-    s_status.calibration_ready = 0U;
-    s_status.calibration_progress = 0U;
-    s_cal_pitch_sum = 0.0f;
-    s_cal_magnitude_sum = 0.0f;
-    s_impact_consecutive = 0U;
+    s_status.lift_latched = 0U;
+    s_status.lift_cause = B4_LIFT_NONE;
+    s_status.motion = B4_MOTION_CALIBRATING;
+    s_motion_candidate = B4_MOTION_CALIBRATING;
+    s_motion_count = 0U;
+    b4_calibration_restart();
     s_i2c_consecutive = 0U;
     s_prev_travel_mm = s_travel_mm;
     /* Preserve max hump encountered during the existing mission. */

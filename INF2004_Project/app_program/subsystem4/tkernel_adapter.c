@@ -8,6 +8,15 @@
  *    (instead of failing once at boot and staying dead).
  *  - imu_task feeds S2's encoder odometry into b4_update_travel_mm(); before
  *    this nothing called it, so the hump profile could never complete.
+ *
+ * LIFT / OVERTURN (replaces impact detection, per the updated brief):
+ *  - lifting or overturning the robot calls b2_emergency_brake() (IF-04);
+ *    the brake stays latched until a remote RESET, so lifting the robot at
+ *    the end of the demo run stops it for good.
+ *  - imu_task also feeds S2's wheel speeds into b4_update_wheel_speeds()
+ *    (turn rate + motion class).
+ *  - S4's events (hump, lift, sensor fault) are printed on the console;
+ *    S1 reports them over MQTT from b4_get_status() (hump_count etc.).
  */
 #include "tkernel_adapter.h"
 #include "../subsystem2/tkernel_adapter.h"
@@ -27,6 +36,30 @@ static void subsystem4_urgent_brake(void *context)
     b2_emergency_brake();
 }
 
+static const char *const s4_cause_name[] = {"-", "LIFTED", "OVERTURNED"};
+
+/* S4 event sink: console log (bench evidence). Never fails, so S4 never
+   treats a slow console as a lost event. */
+static bool subsystem4_event(const b4_event_t *ev, void *context)
+{
+    (void)context;
+    switch (ev->type) {
+    case B4_EVENT_HUMP_COMPLETE:
+        tm_printf((UB*)"[S4] hump complete: %u mm\n", (unsigned)ev->height_mm);
+        break;
+    case B4_EVENT_LIFTED:
+        tm_printf((UB*)"[S4] %s - motors stopped (RESET to clear)\n",
+                  (ev->cause <= B4_LIFT_OVERTURNED) ?
+                  s4_cause_name[ev->cause] : "?");
+        break;
+    default:
+        tm_printf((UB*)"[S4] sensor fault %d - motors stopped\n",
+                  (int)ev->fault);
+        break;
+    }
+    return true;
+}
+
 /* Forward path from S2 odometry: mean of both wheels, only ever increasing
    (b4_update_travel_mm ignores decreases, e.g. when reversing). */
 static void subsystem4_feed_odometry(void)
@@ -44,6 +77,37 @@ static void subsystem4_feed_odometry(void)
     {
         b4_update_travel_mm((uint32_t)mean_mm);
     }
+    b4_update_wheel_speeds(st.left_speed_mm_s, st.right_speed_mm_s);
+}
+
+/* Tuning aid: every 2 s, if a new highest upward speed or tilt was seen
+   while NOT lifted, print it. After a full run these show how close
+   normal driving comes to the lift thresholds. */
+static void subsystem4_report_peaks(void)
+{
+    static UW polls;
+    static int16_t shown_up;
+    static uint16_t shown_tilt;
+    b4_status_t st;
+
+    if (++polls < (2000U / S4_SAMPLE_MS))
+    {
+        return;
+    }
+    polls = 0U;
+    b4_get_status(&st);
+    if ((st.peak_up_speed_mm_s > shown_up + 10) ||
+        (st.peak_tilt_cdeg > shown_tilt + 200U) ||
+        (st.peak_up_speed_mm_s < shown_up))      /* reset after RESET */
+    {
+        shown_up = st.peak_up_speed_mm_s;
+        shown_tilt = st.peak_tilt_cdeg;
+        tm_printf((UB*)"[S4] peaks without lift: up-speed %d mm/s (limit %u), "
+                  "tilt %u deg (limit %u)\n",
+                  (int)shown_up, (unsigned)s4_config.lift_speed_mm_s,
+                  (unsigned)(shown_tilt / 100U),
+                  (unsigned)s4_config.lift_tilt_deg);
+    }
 }
 
 static void subsystem4_task(INT stacd, void *exinf)
@@ -53,7 +117,8 @@ static void subsystem4_task(INT stacd, void *exinf)
     (void)stacd;
     (void)exinf;
 
-    while (!b4_init(&s4_config, NULL, subsystem4_urgent_brake, NULL))
+    while (!b4_init(&s4_config, subsystem4_event,
+                    subsystem4_urgent_brake, NULL))
     {
         if (!reported)
         {
@@ -72,6 +137,7 @@ static void subsystem4_task(INT stacd, void *exinf)
     {
         subsystem4_feed_odometry();
         b4_poll();
+        subsystem4_report_peaks();
         (void)tk_dly_tsk(S4_SAMPLE_MS);
     }
 }
@@ -80,7 +146,14 @@ EXPORT ER subsystem4_init(void)
 {
     s4_config.i2c_addr = B4_ACCEL_ADDR_DEFAULT;
     s4_config.i2c_speed_khz = 100U;
-    s4_config.impact_threshold_mg = 600U; /* provisional; tune on course */
+    /* Lift / overturn: PROVISIONAL, tune on the robot (S4-M01..M04).
+       lift_tilt_deg must stay above the steepest hump on the course. */
+    s4_config.lift_accel_mg = 250U;
+    /* A hand lift is 200-500 mm/s; a hump at line speed is ~20 mm/s. */
+    s4_config.lift_speed_mm_s = 150U;
+    s4_config.lift_tilt_deg = 30U;
+    s4_config.overturn_tilt_deg = 60U;
+    s4_config.wheel_track_mm = S4_WHEEL_TRACK_MM;
     /* GY-511 is mounted with its pin header across the car, so the chip's
        Y axis is the car's forward axis.  Nose-up must give positive pitch:
        if it reads negative, set forward_axis_sign = 0U. */

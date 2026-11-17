@@ -43,8 +43,8 @@ VEH_STATE = ["INIT", "IDLE", "LINE_FOLLOW", "LINE_SEARCH", "BARCODE_NAV",
              "OBSTACLE_AVOID", "SAFE_STOP"]
 LINK_STATE = ["INIT", "WIFI_CONNECTING", "MQTT_CONNECTING", "ONLINE",
               "BACKOFF", "SAFE_LOCAL"]
-EVENT = {1: "STATE_CHANGE", 2: "BARCODE", 3: "HUMP_PEAK", 4: "OBSTACLE",
-         5: "IMPACT", 6: "ESTOP"}
+EVENT = {1: "STATE_CHANGE", 2: "BARCODE", 3: "HUMP", 4: "OBSTACLE",
+         5: "LIFTED", 6: "ESTOP"}
 # Names for the numbers in the status packet, used by the live panel.
 # Keep in sync with team_interfaces.h (TLM_FAULT_Sn, barcode_cmd_t,
 # event_source_t) and subsystem5/ultrasonic.h (subsystem5_state_t).
@@ -53,7 +53,11 @@ FAULT_BITS = {2: "S2 motors/encoders", 3: "S3 line/barcode", 4: "S4 IMU/tilt",
 OBS_STATE = ["MONITOR", "WAIT_STOP", "COARSE", "FINE", "PROFILE_READY", "BYPASS",
              "FAULT"]
 BARCODE = ["none", "LEFT", "RIGHT", "STRAIGHT", "UTURN", "INVALID"]
-EVT_SRC = ["button", "laptop", "IMU impact", "motion", "ultrasonic", "line"]
+EVT_SRC = ["button", "laptop", "IMU lift/overturn", "motion", "ultrasonic", "line"]
+# subsystem4/motion_class.h (b4_motion_t) and posture.h (b4_lift_cause_t)
+MOTION = ["CALIBRATING", "STATIONARY", "MOVING", "TURNING", "ON_HUMP", "LIFTED",
+          "OVERTURNED"]
+LIFT_CAUSE = ["-", "LIFTED", "OVERTURNED"]
 DRIVING = {"LINE_FOLLOW", "BARCODE_NAV", "OBSTACLE_AVOID"}   # wheels should turn
 SPEED_MAX, OBS_CM_MAX = (1 << 10) - 1, (1 << 9) - 1           # field saturation
 
@@ -62,6 +66,10 @@ STATUS_FIELDS = [("vehicle_state", 3), ("estop", 1), ("line", 2), ("barcode", 3)
                  ("speed_l", 10), ("speed_r", 10), ("enc_l", 16), ("enc_r", 16),
                  ("dist_cm", 12), ("pitch", 7), ("hump_max_mm", 8),
                  ("obs_state", 3), ("obs_cm", 9), ("faults", 8)]
+# Appended later (19-byte frame). Skipped when an older 17-byte frame arrives.
+STATUS_FIELDS_2 = [("yaw_dps", 9), ("motion", 3)]
+# Lift-detection signals (21-byte frame): upward speed / 4 mm/s, total tilt.
+STATUS_FIELDS_3 = [("up_speed", 8), ("tilt", 7)]
 HEARTBEAT_FIELDS = [("uptime_s", 16), ("rssi_neg", 7), ("link", 3), ("cmds_ok", 8),
                     ("cmds_rej", 8), ("queue_full", 8), ("reconnects", 8)]
 ACK_FIELDS = [("cmd_seq", 16), ("cmd", 4), ("result", 4)]
@@ -100,6 +108,12 @@ def decode_status(data: bytes) -> dict:
     d = decode_header(r)
     d.update(r.fields(STATUS_FIELDS))
     d["pitch"] -= 64                      # sent as pitch + 64
+    if r.nbits - r.pos >= sum(bits for _, bits in STATUS_FIELDS_2):
+        d.update(r.fields(STATUS_FIELDS_2))
+        d["yaw_dps"] -= 256               # sent as yaw + 256
+    if r.nbits - r.pos >= sum(bits for _, bits in STATUS_FIELDS_3):
+        d.update(r.fields(STATUS_FIELDS_3))
+        d["up_speed"] *= 4                # sent as mm/s / 4
     return d
 
 
@@ -131,6 +145,9 @@ def decode_event(data: bytes) -> dict:
         d["height_mm"] = r.get(8)
     elif etype == 4:
         d.update(r.fields(OBSTACLE_FIELDS))
+    elif etype == 5:
+        c = r.get(2)
+        d["cause"] = LIFT_CAUSE[c] if c < len(LIFT_CAUSE) else f"?{c}"
     return d
 
 
@@ -178,7 +195,7 @@ class Panel:
     commands are typed at the bottom as before. Uses plain ANSI escapes, so
     it needs no extra packages (Windows Terminal, PowerShell, Linux, macOS).
     """
-    HEIGHT = 15                       # rows the panel occupies (4 for warnings)
+    HEIGHT = 16                       # rows the panel occupies (4 for warnings)
     STALE_S = 1.5                     # status older than this = link problem
     STILL_S = 2.0                     # encoder unchanged this long = not turning
 
@@ -369,6 +386,10 @@ class Panel:
         bc_txt = "-" if bc is None else BARCODE[bc] if bc < len(BARCODE) else f"?{bc}"
         pitch = g("pitch", None)
         pitch_txt = "-" if pitch is None else f"{pitch:+d} deg"
+        yaw = g("yaw_dps", None)
+        yaw_txt = "-" if yaw is None else f"{yaw:+d} deg/s"
+        mo = g("motion", None)
+        motion_name = "-" if mo is None else MOTION[mo] if mo < len(MOTION) else f"?{mo}"
         os_ = g("obs_state", None)
         obs_name = "-" if os_ is None else OBS_STATE[os_] if os_ < len(OBS_STATE) else f"?{os_}"
         obs_cm = g("obs_cm")
@@ -410,6 +431,11 @@ class Panel:
              (f"{g('dist_cm')} cm", "")],
             [("Tilt      ", DIM), (f"pitch {pitch_txt:<9}", ""), ("hump max ", DIM),
              (f"{g('hump_max_mm')} mm", "")],
+            [("Motion    ", DIM), (f"{motion_name:<14}",
+                                    RED if motion_name in ("LIFTED", "OVERTURNED") else ""),
+             ("turn ", DIM), (f"{yaw_txt:<12}", ""),
+             ("lift signal ", DIM),
+             (f"up {g('up_speed')} mm/s  tilt {g('tilt')} deg", "")],
             [("Obstacle  ", DIM), (f"{obs_name:<14}", RED if obs_name == "FAULT" else ""),
              ("nearest ", DIM), (f"{obs_cm} cm", YELLOW if obs_cm == OBS_CM_MAX else "")],
             [("Commands  ", DIM), (cmds, "")] + ack,
@@ -555,6 +581,7 @@ class Dashboard:
                           f" estop={d.get('estop')} spd={d.get('speed_l')}/{d.get('speed_r')}"
                           f" dist={d.get('dist_cm')}cm pitch={d.get('pitch')}"
                           f" hump={d.get('hump_max_mm')}mm obs={d.get('obs_cm')}cm"
+                          f" yaw={d.get('yaw_dps')}dps motion={d.get('motion')}"
                           f" ({len(msg.payload)} B)")
             elif msg.topic == T_HEARTBEAT:
                 d = decode_heartbeat(msg.payload)

@@ -39,7 +39,7 @@
 #define TLM_PUMP_MAX_PER_TICK   (4u)    /* frames published per pump tick */
 
 /* ---- Buffers --------------------------------------------------------- */
-#define TLM_FRAME_MAX           (240u)  /* largest payload (JSON status) */
+#define TLM_FRAME_MAX           (288u)  /* largest payload (JSON status) */
 #define TLM_MBF_MSG_MAX         (TLM_FRAME_MAX + 1u)  /* + topic ID byte */
 #define TLM_MBF_BYTES           (2048u) /* outgoing message buffer size */
 #define TLM_CMD_MAX             (16u)   /* commands are 5 bytes */

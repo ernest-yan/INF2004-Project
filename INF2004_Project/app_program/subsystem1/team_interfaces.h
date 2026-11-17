@@ -63,7 +63,7 @@ bool vehicle_post_event(const vehicle_event_t *p_evt);
 /* Remote E-STOP: b2_emergency_brake(), latched until a RESET. */
 void safety_raise_estop(uint8_t source, uint32_t t_rx_us);
 
-/* Remote RESET: clears S2's brake, S4's impact and S5's fault, only if the
+/* Remote RESET: clears S2's brake, S4's lift latch and S5's fault, only if the
  * wheels are still. Never re-enables driving (needs a new START).
  * Returns false if refused. */
 bool safety_reset_while_stopped(void);
@@ -119,7 +119,14 @@ typedef struct
 {
     int8_t   pitch_deg;
     uint8_t  hump_max_mm;    /* highest hump so far (FR5) */
-    uint16_t impact_count;   /* +1 per detected impact (event trigger) */
+    uint8_t  last_hump_mm;   /* height of the last completed hump */
+    uint16_t hump_count;     /* +1 per completed hump (event trigger) */
+    uint16_t lift_count;     /* +1 per lift/overturn latch (event trigger) */
+    uint8_t  lift_cause;     /* 0 none, 1 lifted, 2 overturned */
+    int16_t  yaw_dps;        /* turn rate, + = left (from wheel speeds) */
+    uint8_t  motion;         /* b4_motion_t: 7 values -> 3 bits */
+    uint16_t up_speed_mm_s;  /* lift signal: recent upward speed, 0 if down */
+    uint8_t  tilt_deg;       /* lift signal: tilt in any direction, 0..180 */
 } imu_status_t;
 
 void imu_get_status(imu_status_t *p_out);
