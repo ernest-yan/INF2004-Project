@@ -41,6 +41,10 @@ typedef struct
 #define PITCH_MIN_DEG   (-64)
 #define PITCH_MAX_DEG   (63)
 #define PITCH_OFFSET    (64)
+#define YAW_MIN_DPS     (-256)
+#define YAW_MAX_DPS     (255)
+#define YAW_OFFSET      (256)
+#define UP_SPEED_STEP   (4u)        /* mm/s per count */
 
 static void
 bw_init(tlm_bitwriter_t *p_w, uint8_t *p_buf, uint32_t cap)
@@ -149,7 +153,16 @@ tlm_encode_status(const tlm_status_t *p_s, uint8_t *p_buf, uint32_t cap)
 {
     tlm_bitwriter_t w;
     int16_t         pitch = p_s->pitch_deg;
+    int16_t         yaw   = p_s->yaw_dps;
 
+    if (yaw < YAW_MIN_DPS)
+    {
+        yaw = YAW_MIN_DPS;
+    }
+    if (yaw > YAW_MAX_DPS)
+    {
+        yaw = YAW_MAX_DPS;
+    }
     if (pitch < PITCH_MIN_DEG)
     {
         pitch = PITCH_MIN_DEG;
@@ -175,6 +188,10 @@ tlm_encode_status(const tlm_status_t *p_s, uint8_t *p_buf, uint32_t cap)
     bw_put_sat(&w, p_s->obstacle_state, 3u);
     bw_put_sat(&w, p_s->obstacle_cm, 9u);
     bw_put(&w, p_s->fault_mask, 8u);
+    bw_put(&w, (uint32_t) (yaw + YAW_OFFSET), 9u);
+    bw_put_sat(&w, p_s->motion, 3u);
+    bw_put_sat(&w, (uint32_t) p_s->up_speed_mm_s / UP_SPEED_STEP, 8u);
+    bw_put_sat(&w, p_s->tilt_deg, 7u);
     return bw_finish(&w);
 }
 
@@ -230,7 +247,7 @@ tlm_encode_event(const tlm_event_t *p_e, uint8_t *p_buf, uint32_t cap)
             bw_put_sat(&w, p_e->a, 3u);
             break;
 
-        case TLM_EVT_HUMP_PEAK:
+        case TLM_EVT_HUMP:
             bw_put(&w, p_e->a, 8u);
             break;
 
@@ -243,7 +260,11 @@ tlm_encode_event(const tlm_event_t *p_e, uint8_t *p_buf, uint32_t cap)
             bw_put_sat(&w, p_e->obs_decision, 3u);
             break;
 
-        default:    /* TLM_EVT_IMPACT and unknown types: header + type only */
+        case TLM_EVT_LIFTED:
+            bw_put_sat(&w, p_e->a, 2u);
+            break;
+
+        default:    /* unknown types: header + type only */
             break;
     }
     return bw_finish(&w);
@@ -353,7 +374,11 @@ tlm_format_status_json(const tlm_status_t *p_s, char *p_buf, uint32_t cap)
     jw_field(&j, "hump_max_mm", (int32_t) p_s->hump_max_mm, false);
     jw_field(&j, "obs_state", (int32_t) p_s->obstacle_state, false);
     jw_field(&j, "obs_cm", (int32_t) p_s->obstacle_cm, false);
-    jw_field(&j, "faults", (int32_t) p_s->fault_mask, true);
+    jw_field(&j, "faults", (int32_t) p_s->fault_mask, false);
+    jw_field(&j, "yaw_dps", (int32_t) p_s->yaw_dps, false);
+    jw_field(&j, "motion", (int32_t) p_s->motion, false);
+    jw_field(&j, "up_speed", (int32_t) p_s->up_speed_mm_s, false);
+    jw_field(&j, "tilt", (int32_t) p_s->tilt_deg, true);
     jw_char(&j, '}');
 
     p_buf[j.len] = '\0';

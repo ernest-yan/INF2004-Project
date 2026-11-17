@@ -43,8 +43,8 @@ LOCAL volatile BOOL	g_go = S1_GO_AT_POWER_ON;	/* s1_mission_go() */
 LOCAL BOOL		g_remote_estop;	/* remote E-STOP latched until RESET */
 
 /* Rising-edge counters for the telemetry EVENT frames. */
-LOCAL BOOL	g_prev_impact;
-LOCAL UH	g_impact_count;
+LOCAL BOOL	g_prev_lift;
+LOCAL UH	g_lift_count;
 LOCAL BOOL	g_prev_scan;
 LOCAL UH	g_profile_count;
 
@@ -138,16 +138,17 @@ bool safety_reset_while_stopped(void)
 		tm_printf((UB*)"[S1] RESET refused: wheels still moving\n");
 		return false;
 	}
-	if (i.impact_latched || (i.fault != B4_FAULT_NONE)) {
-		/* S4 recalibrates next: keep the car still for a moment. */
+	if (i.lift_latched || (i.fault != B4_FAULT_NONE)) {
+		/* S4 recalibrates next: the car must be back on the ground
+		   and still for ~0.5 s. */
 		(void)b4_authorized_reset_while_stopped();
 	}
 	if (u.state == subsystem5_STATE_FAULT) {
 		subsystem5_reset_fault_while_stopped();	/* done in S5's task */
 	}
 	g_remote_estop = FALSE;
-	tm_printf((UB*)"[S1] RESET done (brake %d, impact %d, S5 fault %d), send START to drive\n",
-		  (int)m.brake_latched, (int)i.impact_latched, (int)u.fault);
+	tm_printf((UB*)"[S1] RESET done (brake %d, lift %d, S5 fault %d), send START to drive\n",
+		  (int)m.brake_latched, (int)i.lift_latched, (int)u.fault);
 	return true;
 }
 
@@ -177,7 +178,7 @@ void vehicle_get_status(vehicle_status_t *p_out)
 	if (!s2_ready()) {
 		p_out->state = (uint8_t)VEH_STATE_INIT;
 	} else if (m.brake_latched || (m.state == B2_FAULT) ||
-		   i.impact_latched || (u.state == subsystem5_STATE_FAULT)) {
+		   i.lift_latched || (u.state == subsystem5_STATE_FAULT)) {
 		p_out->state = (uint8_t)VEH_STATE_SAFE_STOP;
 	} else if (u.state != subsystem5_STATE_MONITOR) {
 		p_out->state = (uint8_t)VEH_STATE_OBSTACLE_AVOID;
@@ -192,10 +193,12 @@ void vehicle_get_status(vehicle_status_t *p_out)
 		p_out->state = (uint8_t)VEH_STATE_IDLE;
 	}
 
-	/* The only latch is S2's brake (S4 pulls it on an impact). */
+	/* The only latch is S2's brake (S4 pulls it when the robot is lifted
+	   or overturned, or the IMU fails). */
 	p_out->b_estop_latched = (m.brake_latched != 0u);
 	p_out->estop_source    = g_remote_estop?   (uint8_t)EVT_SRC_REMOTE:
-				 i.impact_latched? (uint8_t)EVT_SRC_IMU:
+				 (i.lift_latched || (i.state == B4_STATE_FAULT))?
+						   (uint8_t)EVT_SRC_IMU:
 						   (uint8_t)EVT_SRC_MOTION;
 
 	if ((m.fault != B2_FAULT_NONE) || (m.state == B2_FAULT)) {
@@ -269,15 +272,23 @@ void imu_get_status(imu_status_t *p_out)
 		pitch = PITCH_MAX_DEG;
 	}
 
-	/* S4 only latches an impact: count each new latch. */
-	if (s.impact_latched && !g_prev_impact) {
-		g_impact_count++;
+	/* S4 latches a lift / overturn: count each new latch. */
+	if (s.lift_latched && !g_prev_lift) {
+		g_lift_count++;
 	}
-	g_prev_impact = (s.impact_latched != 0u);
+	g_prev_lift = (s.lift_latched != 0u);
 
 	p_out->pitch_deg    = (int8_t)pitch;
 	p_out->hump_max_mm  = clamp_u8(s.max_hump_height_mm);
-	p_out->impact_count = g_impact_count;
+	p_out->last_hump_mm = clamp_u8(s.last_hump_height_mm);
+	p_out->hump_count   = s.hump_count;
+	p_out->lift_count   = g_lift_count;
+	p_out->lift_cause   = (uint8_t)s.lift_cause;
+	p_out->yaw_dps      = s.yaw_rate_dps;
+	p_out->motion       = (uint8_t)s.motion;
+	p_out->up_speed_mm_s = (s.recent_up_speed_mm_s > 0)?
+			       (uint16_t)s.recent_up_speed_mm_s: 0u;
+	p_out->tilt_deg     = clamp_u8((uint32_t)s.tilt_cdeg / CDEG_PER_DEG);
 }
 
 void ultra_get_status(ultra_status_t *p_out)

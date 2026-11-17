@@ -130,6 +130,13 @@ MovementAction_t get_action_for_character(char c);
 					   inner wheel reverses (tight curves) */
 #define S3_STEER_HARD_MM_S	40	/* reversed inner wheel speed; S2 checks
 					   the encoder for stalls from 40 up */
+#define S3_STEER_EXIT_MS	0	/* centre found the line again after a
+					   correction: keep arcing gently that way
+					   this long (0 = off, snap straight).
+					   Try 150 only if the car undershoots
+					   curves (wobbles on the inside) */
+#define S3_STEER_EXIT_INNER_MM_S 50	/* inner wheel during that soft exit
+					   (outer = S3_LINE_SPEED_MM_S) */
 #define S3_SCAN_HOLD_MAX_MS	3000	/* drive straight at most this long while
 					   GP16 scans (141 mm barcode = 2 s at 70) */
 #define S3_TURN_SPEED_MM_S	80	/* barcode turns */

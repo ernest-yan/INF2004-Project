@@ -5,8 +5,8 @@
  *	Every 200 ms: read every buddy's status (their *_get_status()
  *	getters), pack one STATUS frame, and drop it into s1_mbf_out.
  *	Every 1 s:    pack one HEARTBEAT frame.
- *	On a change:  pack an EVENT frame (barcode, hump peak, obstacle,
- *	              impact, state change, E-STOP).
+ *	On a change:  pack an EVENT frame (barcode, hump, obstacle,
+ *	              lifted/overturned, state change, E-STOP).
  *	On a command: act on what the WiFi task queued in s1_mbf_cmd.
  *
  *	It never touches WiFi/lwIP/MQTT: the WiFi service task empties the
@@ -103,15 +103,16 @@ LOCAL void detect_events(UH session, const vehicle_status_t *p_v,
 		x.a    = p_l->last_barcode;
 		send_event(&x, session);
 	}
-	if (p_i->hump_max_mm > g_prev_i.hump_max_mm) {
+	if (p_i->hump_count != g_prev_i.hump_count) {
 		tlm_event_t x = {0};
-		x.type = (uint8_t)TLM_EVT_HUMP_PEAK;
-		x.a    = p_i->hump_max_mm;
+		x.type = (uint8_t)TLM_EVT_HUMP;
+		x.a    = p_i->last_hump_mm;
 		send_event(&x, session);
 	}
-	if (p_i->impact_count != g_prev_i.impact_count) {
+	if (p_i->lift_count != g_prev_i.lift_count) {
 		tlm_event_t x = {0};
-		x.type = (uint8_t)TLM_EVT_IMPACT;
+		x.type = (uint8_t)TLM_EVT_LIFTED;
+		x.a    = p_i->lift_cause;
 		send_event(&x, session);
 	}
 	if (p_u->profile_count != g_prev_u.profile_count) {
@@ -161,6 +162,10 @@ LOCAL void send_status(UH session)
 	s.obstacle_state  = u.obstacle_state;
 	s.obstacle_cm     = u.nearest_cm;
 	s.fault_mask      = v.fault_mask;
+	s.yaw_dps         = i.yaw_dps;
+	s.motion          = i.motion;
+	s.up_speed_mm_s   = i.up_speed_mm_s;
+	s.tilt_deg        = i.tilt_deg;
 
 #if TLM_USE_JSON_STATUS
 	{

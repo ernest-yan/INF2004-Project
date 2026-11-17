@@ -153,7 +153,7 @@ test_status_frame(void)
 {
     tlm_status_t s;
     uint8_t      buf[32];
-    char         json[300];
+    char         json[320];
     uint32_t       n;
     uint32_t       j;
 
@@ -174,9 +174,23 @@ test_status_frame(void)
     s.obstacle_state = 5u;
     s.obstacle_cm = 87u;
     s.fault_mask = 0xA5u;
+    s.yaw_dps = -90;               /* sent as 166 = 0b010100110 */
+    s.motion = 3u;                 /* TURNING */
+    s.up_speed_mm_s = 200u;        /* sent as 50 = 0b00110010 */
+    s.tilt_deg = 33u;              /* 0b0100001 */
 
     n = tlm_encode_status(&s, buf, sizeof(buf));
     CHECK(n == TLM_STATUS_LEN);
+    /* yaw (9) + motion (3) are the last 12 bits, after bit 136 */
+    CHECK(buf[17] == 0x53u);       /* 01010011 */
+    CHECK(buf[18] == 0x33u);       /* 0 011 + up speed 0011 */
+    CHECK(buf[19] == 0x24u);       /* up speed 0010 + tilt 0100 */
+    CHECK(buf[20] == 0x20u);       /* tilt 001 + 5 padding bits */
+    s.yaw_dps = 1000;              /* out of range: must saturate to 255 */
+    (void) tlm_encode_status(&s, buf, sizeof(buf));
+    CHECK(buf[17] == 0xFFu && (buf[18] & 0x80u) != 0u);
+    s.yaw_dps = -90;
+    n = tlm_encode_status(&s, buf, sizeof(buf));
     CHECK(tlm_encode_status(&s, buf, 10u) == 0u);   /* too small buffer */
 
     j = tlm_format_status_json(&s, json, sizeof(json));
@@ -212,8 +226,13 @@ test_other_frames(void)
     memset(&e, 0, sizeof(e));
     e.type = TLM_EVT_OBSTACLE;
     CHECK(tlm_encode_event(&e, buf, sizeof(buf)) == TLM_EVENT_MAX_LEN);
-    e.type = TLM_EVT_IMPACT;
-    CHECK(tlm_encode_event(&e, buf, sizeof(buf)) == 4u);
+    e.type = TLM_EVT_LIFTED;       /* 28 + 4 + 2 bits = 5 bytes */
+    e.a = 2u;                      /* overturned */
+    CHECK(tlm_encode_event(&e, buf, sizeof(buf)) == 5u);
+    CHECK((buf[4] & 0xC0u) == 0x80u);
+    e.type = TLM_EVT_HUMP;
+    e.a = 37u;
+    CHECK(tlm_encode_event(&e, buf, sizeof(buf)) == 5u);
 }
 
 int
