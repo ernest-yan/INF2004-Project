@@ -35,6 +35,8 @@ typedef struct
                                       must be above the steepest hump. */
     uint8_t overturn_tilt_deg;     /* PROVISIONAL: on its side or roof. */
     uint16_t wheel_track_mm;       /* = S2's B2_CAL_WHEEL_TRACK_MM. */
+    uint16_t wheelbase_mm;         /* front-to-rear ground contacts (hump
+                                      height = wheelbase x sin(peak tilt)). */
     uint8_t forward_axis_sign;     /* 1 normal, 0 invert. Physical calibration. */
     uint8_t forward_axis_is_y;     /* 0: chip X points forward, 1: chip Y does
                                       (GY-511 header mounted across the car). */
@@ -74,6 +76,10 @@ typedef struct
 {
     b4_event_type_t type;
     uint16_t height_mm;            /* HUMP_COMPLETE */
+    int16_t max_pitch_cdeg;        /* HUMP_COMPLETE: peak nose-up */
+    int16_t min_pitch_cdeg;        /* HUMP_COMPLETE: peak nose-down */
+    uint16_t peak_gap_mm;          /* HUMP_COMPLETE: travel between the two
+                                      peaks, should be about the wheelbase */
     b4_lift_cause_t cause;         /* LIFTED */
     b4_fault_t fault;              /* SENSOR_FAULT */
 } b4_event_t;

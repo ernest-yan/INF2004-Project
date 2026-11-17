@@ -119,6 +119,7 @@ static void *s_publish_context;
 static uint8_t s_range_active;
 static uint8_t s_scan_index;
 static uint8_t s_scan_retries;
+static uint8_t s_reverse_count;
 static uint8_t s_monitor_invalid;
 static uint8_t s_close_count;
 static uint8_t s_servo_angle;
@@ -454,14 +455,19 @@ static void subsystem5_prepare_fine(void)
         return;
     }
 
-    /* Shift the window at scan-arc limits to avoid duplicate angles. */
+    /* 15 rays, 5 degrees apart, centred on the closest coarse ray; the
+       window is shifted at the arc limits so every angle is reachable. */
     {
+        const uint8_t span = (uint8_t)((subsystem5_FINE_COUNT - 1U) *
+                                       subsystem5_FINE_STEP_DEG);
+        const uint8_t last_start = (uint8_t)(subsystem5_SERVO_MAX_DEG - span);
         const uint8_t first = subsystem5_clamp_angle(
-            (int16_t)((focus > 20U) ? (focus - 20U) : 0U));
-        const uint8_t start = (first > 110U) ? 110U : first;
+            (int16_t)focus - (int16_t)(span / 2U));
+        const uint8_t start = (first > last_start) ? last_start : first;
         for (index = 0U; index < subsystem5_FINE_COUNT; index++)
         {
-            s_fine_angles[index] = (uint8_t)(start + (index * 10U));
+            s_fine_angles[index] =
+                (uint8_t)(start + (index * subsystem5_FINE_STEP_DEG));
         }
     }
 
@@ -469,6 +475,10 @@ static void subsystem5_prepare_fine(void)
     s_status.state = subsystem5_STATE_FINE;
     subsystem5_servo_set(s_fine_angles[0]);
 }
+
+#if APP_MISSION_ENABLE
+static void subsystem5_reverse_begin(void);
+#endif
 
 static void subsystem5_scan_finish(void)
 {
@@ -497,8 +507,32 @@ static void subsystem5_scan_finish(void)
         return;
     }
 
+    {
+        const subsystem5_profile_t *p = &s_status.profile;
+        s_status.profile_count++;
+        tm_printf((UB*)"[S5] profile: closest %u mm @ %u deg, width %u mm%s "
+                  "(edges %u deg/%u mm .. %u deg/%u mm), clear L %u R %u mm\n",
+                  (unsigned)p->closest_mm, (unsigned)p->closest_angle_deg,
+                  (unsigned)p->approximate_width_mm,
+                  p->width_capped ? "+ (wider than the sweep)" : "",
+                  (unsigned)p->right_edge_deg, (unsigned)p->right_edge_mm,
+                  (unsigned)p->left_edge_deg, (unsigned)p->left_edge_mm,
+                  p->left_clearance_valid ? (unsigned)p->left_clearance_mm : 0U,
+                  p->right_clearance_valid ? (unsigned)p->right_clearance_mm : 0U);
+    }
+
     if (s_status.profile.candidate_side == subsystem5_SIDE_NONE)
     {
+#if APP_MISSION_ENABLE
+        if ((s_reverse_count < subsystem5_MAX_REVERSES) && s1_mission_go())
+        {
+            s_reverse_count++;
+            subsystem5_reverse_begin();
+            return;
+        }
+#endif
+        tm_printf((UB*)"[S5] no side has %u mm clear: stopped\n",
+                  (unsigned)subsystem5_SIDE_CLEAR_MM);
         subsystem5_fault(subsystem5_FAULT_NO_SAFE_SIDE);
         return;
     }
@@ -561,159 +595,393 @@ static void subsystem5_scan_step(uint32_t now_us)
 }
 
 #if APP_MISSION_ENABLE
-/* Obstacle bypass: a rectangle around the obstacle on the side the scan chose,
- * then forward until the line is found and one last turn back onto it.  Runs
- * one S2 goal at a time and never blocks this task. */
-#define subsystem5_BYPASS_STEPS   (7U)
-#define subsystem5_BYPASS_SEEK    (5U)    /* index of the line-seeking leg */
+/* Obstacle bypass, driven by the SENSORS rather than exact turn angles: the
+ * car's pivot turns are off by tens of degrees (17 Nov: a "90 degree" turn
+ * went ~105 by the encoders, ~150 by eye), so a fixed rectangle of 90-degree
+ * turns drove off in the wrong direction.
+ *   TURN_OUT   pivot away from the obstacle until the front ray sees past it,
+ *              then a little more for the car body.
+ *   OUT        straight, far enough sideways to clear the obstacle's edge.
+ *   TURN_BACK  pivot back by the SAME encoder count as TURN_OUT. Both turns
+ *              share any turn error, so the heading returns to the line's.
+ *   PASS       straight, the sensor looking at the obstacle 60 degrees to the
+ *              side, until the obstacle is behind the car.
+ *   TURN_IN    pivot toward the line by the same count again.
+ *   SEEK       straight until the line sensors find the line.
+ *   ALIGN      pivot back by the same count (line direction), then line
+ *              following takes over.
+ * Speed commands + this task's own encoder counting, so every phase can end
+ * on a sensor reading. */
+#define BP_TURN_OUT   (0U)
+#define BP_OUT        (1U)
+#define BP_TURN_BACK  (2U)
+#define BP_PASS       (3U)
+#define BP_TURN_IN    (4U)
+#define BP_SEEK       (5U)
+#define BP_ALIGN      (6U)
 
-typedef struct
+static const char *const s_bp_name[] =
 {
-    b2_cmd_type_t type;
-    uint16_t amount;        /* mm for a move, degrees for a turn */
-} subsystem5_bypass_step_t;
+    "turn out", "out", "turn back", "pass", "turn in", "seek line", "align"
+};
 
-static subsystem5_bypass_step_t s_bypass_steps[subsystem5_BYPASS_STEPS];
-static uint8_t s_bypass_index;
-static b2_goal_t s_bypass_goal;
+static b2_goal_t s_bypass_goal;      /* used by the reverse step */
+static uint8_t s_bp_phase;
+static int8_t s_bp_dir;              /* +1 pass on the right, -1 on the left */
+static uint32_t s_bp_base_ticks;     /* encoder count at the phase start */
+static uint32_t s_bp_turn_ticks;     /* encoder count of TURN_OUT */
+static uint32_t s_bp_clear_at;       /* TURN_OUT: count when clear, 0 = not yet */
+static uint8_t s_bp_clear_count;
+static uint8_t s_bp_seen;            /* PASS: obstacle seen beside the car */
+static uint32_t s_bp_passed_at;      /* PASS: count when passed, 0 = not yet */
+static uint32_t s_bp_out_mm;
+static uint32_t s_bp_line_at;        /* SEEK: count when the line was found */
+static uint32_t s_bp_started_us;
+
+/* Mean of the two wheels' encoder edges (single-channel: always counts up). */
+static uint32_t subsystem5_ticks_now(void)
+{
+    b2_status_t st;
+    b2_get_status(&st);
+    return (st.left_encoder_edges + st.right_encoder_edges) / 2U;
+}
+
+static uint32_t subsystem5_mm_to_ticks(uint32_t mm)
+{
+    return (mm * subsystem5_TICKS_PER_M) / 1000U;
+}
+
+static uint32_t subsystem5_deg_to_ticks(uint32_t deg)
+{
+    return (deg * subsystem5_TICKS_PER_DEG_X10) / 10U;
+}
+
+static void subsystem5_drive(int32_t left_mm_s, int32_t right_mm_s)
+{
+    b2_command_t cmd;
+
+    subsystem5_memset(&cmd, 0, (int)sizeof(cmd));
+    cmd.type = B2_CMD_SPEED;
+    cmd.left_mm_s = (int16_t)left_mm_s;
+    cmd.right_mm_s = (int16_t)right_mm_s;
+    (void)b2_submit_command(&cmd);
+}
+
+static void subsystem5_bp_enter(uint8_t phase)
+{
+    const int32_t t = (int32_t)subsystem5_BYPASS_TURN_MM_S * s_bp_dir;
+    const int32_t v = (int32_t)subsystem5_BYPASS_SPEED_MM_S;
+
+    s_bp_phase = phase;
+    s_bp_base_ticks = subsystem5_ticks_now();
+    s_bp_clear_count = 0U;
+    s_bp_line_at = 0U;
+    subsystem5_abort_pending_echo();
+    tm_printf((UB*)"[S5] bypass: %s\n", s_bp_name[phase]);
+
+    switch (phase)
+    {
+    case BP_TURN_OUT:                    /* toward the passing side */
+    case BP_ALIGN:
+        subsystem5_servo_set(90U);
+        subsystem5_drive(t, -t);
+        break;
+    case BP_TURN_BACK:                   /* toward the obstacle / line side */
+    case BP_TURN_IN:
+        subsystem5_servo_set(90U);
+        subsystem5_drive(-t, t);
+        break;
+    case BP_PASS:                        /* look at the obstacle, 60 deg off */
+        subsystem5_servo_set((s_bp_dir > 0) ? 150U : 30U);
+        s_bp_seen = 0U;
+        s_bp_passed_at = 0U;
+        subsystem5_drive(v, v);
+        break;
+    default:                             /* OUT, SEEK: look ahead */
+        subsystem5_servo_set(90U);
+        subsystem5_drive(v, v);
+        break;
+    }
+}
 
 static void subsystem5_bypass_fail(void)
 {
     b2_stop();
     subsystem5_abort_pending_echo();
     subsystem5_fault(subsystem5_FAULT_BYPASS);
-    tm_printf((UB*)"[S5] bypass failed at step %u, stopped\n",
-              (unsigned)s_bypass_index);
+    tm_printf((UB*)"[S5] bypass failed during \"%s\", stopped\n",
+              s_bp_name[s_bp_phase]);
 }
 
-static bool subsystem5_bypass_start_step(void)
+/* How far sideways the car must move: the passing-side edge's offset from
+ * the car's centre line, plus half the car and a margin. */
+static uint32_t subsystem5_out_distance_mm(void)
 {
-    const subsystem5_bypass_step_t *step = &s_bypass_steps[s_bypass_index];
-    b2_command_t cmd;
+    const subsystem5_profile_t *p = &s_status.profile;
+    float edge_mm;
+    float need_mm;
+    float a_deg;
+    float sin_a;
 
-    subsystem5_memset(&cmd, 0, (int)sizeof(cmd));
-    cmd.type = step->type;
-    if (step->type == B2_CMD_MOVE_FORWARD)
+    if ((p->right_edge_mm != 0U) && (p->left_edge_mm != 0U))
     {
-        cmd.distance_mm = step->amount;
+        edge_mm = (s_bp_dir > 0) ?
+            ((float)p->right_edge_mm * subsystem5_cosd(
+                (float)p->right_edge_deg + (float)subsystem5_BEAM_EDGE_DEG)) :
+            -((float)p->left_edge_mm * subsystem5_cosd(
+                (float)p->left_edge_deg - (float)subsystem5_BEAM_EDGE_DEG));
     }
     else
     {
-        cmd.turn_degrees = step->amount;
+        edge_mm = (float)p->approximate_width_mm * 0.5f;
     }
-    cmd.goal_speed_mm_s = subsystem5_BYPASS_SPEED_MM_S;
-    cmd.timeout_ms = subsystem5_BYPASS_TIMEOUT_MS;
-    return b2_goal_start(&s_bypass_goal, &cmd);
+    if (edge_mm < 0.0f) { edge_mm = 0.0f; }
+    need_mm = edge_mm + (float)subsystem5_CAR_HALF_WIDTH_MM +
+              (float)subsystem5_BYPASS_MARGIN_MM;
+
+    /* Angle actually turned is only roughly known: estimate from the count,
+       never below 25 degrees (a long but safe OUT leg). */
+    a_deg = ((float)s_bp_turn_ticks * 10.0f) /
+            (float)subsystem5_TICKS_PER_DEG_X10;
+    if (a_deg < 25.0f) { a_deg = 25.0f; }
+    if (a_deg > 90.0f) { a_deg = 90.0f; }
+    sin_a = subsystem5_cosd(90.0f - a_deg);
+    need_mm /= sin_a;
+    if (need_mm < 120.0f) { need_mm = 120.0f; }
+    if (need_mm > (float)subsystem5_BYPASS_OUT_MAX_MM)
+    {
+        need_mm = (float)subsystem5_BYPASS_OUT_MAX_MM;
+    }
+    return (uint32_t)need_mm;
 }
 
 static void subsystem5_bypass_begin(void)
 {
-    const b2_cmd_type_t away =
-        (s_status.profile.candidate_side == subsystem5_SIDE_LEFT) ?
-        B2_CMD_TURN_LEFT : B2_CMD_TURN_RIGHT;
-    const b2_cmd_type_t back =
-        (away == B2_CMD_TURN_LEFT) ? B2_CMD_TURN_RIGHT : B2_CMD_TURN_LEFT;
-    const uint16_t sideways = (uint16_t)
-        ((s_status.profile.approximate_width_mm / 2U) +
-         subsystem5_BYPASS_MARGIN_MM);
-    const subsystem5_bypass_step_t steps[subsystem5_BYPASS_STEPS] =
-    {
-        { away, 90U },
-        { B2_CMD_MOVE_FORWARD, sideways },
-        { back, 90U },
-        { B2_CMD_MOVE_FORWARD,
-          (uint16_t)(s_status.profile.closest_mm + subsystem5_BYPASS_PASS_MM) },
-        { back, 90U },
-        { B2_CMD_MOVE_FORWARD,
-          (uint16_t)(sideways + subsystem5_BYPASS_SEEK_MM) },
-        { away, 90U }
-    };
-    uint8_t i;
-
-    for (i = 0U; i < subsystem5_BYPASS_STEPS; i++)
-    {
-        s_bypass_steps[i] = steps[i];
-    }
-    s_bypass_index = 0U;
+    s_bp_dir = (s_status.profile.candidate_side == subsystem5_SIDE_LEFT) ?
+               (int8_t)-1 : (int8_t)1;
+    s_bp_turn_ticks = 0U;
+    s_bp_clear_at = 0U;
+    s_bp_out_mm = 0U;
+    s_bp_started_us = subsystem5_now_us();
     s_status.state = subsystem5_STATE_BYPASS;
     s_status.stop_required = 0U;  /* This motion is authorized: VC must not stop it. */
-    subsystem5_abort_pending_echo();
-    tm_printf((UB*)"[S5] bypassing on the %s\n",
-              (away == B2_CMD_TURN_LEFT) ? "left" : "right");
-    if (!subsystem5_bypass_start_step())
-    {
-        subsystem5_bypass_fail();
-    }
-}
-
-static void subsystem5_bypass_next(void)
-{
-    s_bypass_index++;
-    if (s_bypass_index >= subsystem5_BYPASS_STEPS)
-    {
-        tm_printf((UB*)"[S5] bypass done, back on the line\n");
-        subsystem5_reset_for_monitor();
-    }
-    else if (!subsystem5_bypass_start_step())
-    {
-        subsystem5_bypass_fail();
-    }
-    else
-    {
-        /* Next goal is running. */
-    }
+    tm_printf((UB*)"[S5] bypassing on the %s\n", (s_bp_dir > 0) ? "right" : "left");
+    subsystem5_bp_enter(BP_TURN_OUT);
 }
 
 static void subsystem5_bypass_step(uint32_t now_us)
 {
-    const bool moving_forward =
-        (s_bypass_steps[s_bypass_index].type == B2_CMD_MOVE_FORWARD);
-    b2_goal_result_t result;
+    const uint32_t done = subsystem5_ticks_now() - s_bp_base_ticks;
+    subsystem5_sample_t r;
+    bool have = false;
+    b2_status_t st;
 
-    /* Look ahead on the forward legs: the servo is back at 90 degrees. */
-    if (moving_forward)
-    {
-        subsystem5_sample_t ahead;
-
-        if ((s_range_active == 0U) &&
-            ((int32_t)(now_us - s_servo_ready_us) >= 0))
-        {
-            (void)subsystem5_ping_begin(now_us);
-        }
-        ahead.angle_deg = 90U;
-        if (subsystem5_ping_result(now_us, &ahead) && (ahead.valid != 0U))
-        {
-            s_status.front_valid = 1U;
-            s_status.front_mm = ahead.distance_mm;
-            if (ahead.distance_mm <= subsystem5_URGENT_MM)
-            {
-                subsystem5_bypass_fail();
-                return;
-            }
-        }
-    }
-
-    if ((s_bypass_index == subsystem5_BYPASS_SEEK) &&
-        (get_line_barcode_data_safe().line_detected != 0U))
+    b2_get_status(&st);
+    if (!s1_mission_go())
     {
         b2_stop();
-        subsystem5_bypass_next();
+        tm_printf((UB*)"[S5] STOP during the bypass: cancelled\n");
+        subsystem5_reset_for_monitor();
+        return;
+    }
+    if ((st.brake_latched != 0U) || (st.state == B2_FAULT) ||
+        (subsystem5_elapsed(s_bp_started_us, now_us) >
+         (subsystem5_BYPASS_TIMEOUT_MS * 1000U)))
+    {
+        subsystem5_bypass_fail();
         return;
     }
 
-    result = b2_goal_check(&s_bypass_goal);
-    if ((result == B2_GOAL_FAILED) ||
-        ((result == B2_GOAL_DONE) && (s_bypass_index == subsystem5_BYPASS_SEEK)))
+    if ((s_range_active == 0U) &&
+        ((int32_t)(now_us - s_servo_ready_us) >= 0))
     {
-        subsystem5_bypass_fail();   /* Stopped, or drove the whole way: no line. */
+        (void)subsystem5_ping_begin(now_us);
+    }
+    r.angle_deg = s_servo_angle;
+    if (subsystem5_ping_result(now_us, &r) && (r.valid != 0U))
+    {
+        have = true;
+        if (s_servo_angle == 90U)
+        {
+            s_status.front_valid = (r.distance_mm != subsystem5_FAR_MM) ? 1U : 0U;
+            s_status.front_mm = r.distance_mm;
+        }
+    }
+
+    /* Driving straight while looking ahead: never into something. */
+    if (have && (s_servo_angle == 90U) && (r.distance_mm <= subsystem5_URGENT_MM) &&
+        ((s_bp_phase == BP_OUT) || (s_bp_phase == BP_SEEK)))
+    {
+        subsystem5_bypass_fail();
+        return;
+    }
+
+    switch (s_bp_phase)
+    {
+    case BP_TURN_OUT:
+    {
+        const uint32_t clear_mm = (uint32_t)s_status.profile.closest_mm +
+                                  subsystem5_BYPASS_CLEAR_EXTRA_MM;
+        if (have)
+        {
+            s_bp_clear_count = (r.distance_mm > clear_mm) ?
+                (uint8_t)(s_bp_clear_count + 1U) : 0U;
+        }
+        if ((s_bp_clear_at == 0U) && (s_bp_clear_count >= 2U) &&
+            (done >= subsystem5_deg_to_ticks(subsystem5_BYPASS_MIN_TURN_DEG)))
+        {
+            s_bp_clear_at = done;
+        }
+        if ((s_bp_clear_at != 0U) &&
+            (done >= (s_bp_clear_at +
+                      subsystem5_deg_to_ticks(subsystem5_BYPASS_EXTRA_TURN_DEG))))
+        {
+            s_bp_turn_ticks = done;
+            s_bp_out_mm = subsystem5_out_distance_mm();
+            tm_printf((UB*)"[S5] turned %u ticks (~%u deg), out leg %u mm\n",
+                      (unsigned)done,
+                      (unsigned)((done * 10U) / subsystem5_TICKS_PER_DEG_X10),
+                      (unsigned)s_bp_out_mm);
+            subsystem5_bp_enter(BP_OUT);
+        }
+        else if (done > subsystem5_deg_to_ticks(subsystem5_BYPASS_MAX_TURN_DEG))
+        {
+            subsystem5_bypass_fail();    /* never saw past it */
+        }
+        break;
+    }
+    case BP_OUT:
+        if (done >= subsystem5_mm_to_ticks(s_bp_out_mm))
+        {
+            subsystem5_bp_enter(BP_TURN_BACK);
+        }
+        break;
+    case BP_TURN_BACK:
+        if (done >= s_bp_turn_ticks)
+        {
+            subsystem5_bp_enter(BP_PASS);
+        }
+        break;
+    case BP_PASS:
+        if (have)
+        {
+            if (r.distance_mm <= subsystem5_OBSTACLE_ZONE_MM)
+            {
+                s_bp_seen = 1U;
+                s_bp_clear_count = 0U;
+            }
+            else if (s_bp_seen != 0U)
+            {
+                s_bp_clear_count++;
+            }
+        }
+        if ((s_bp_passed_at == 0U) &&
+            (((s_bp_seen != 0U) && (s_bp_clear_count >= 2U)) ||
+             ((s_bp_seen == 0U) &&
+              (done >= subsystem5_mm_to_ticks(subsystem5_BYPASS_PASS_BLIND_MM)))))
+        {
+            s_bp_passed_at = (done > 0U) ? done : 1U;
+        }
+        if ((s_bp_passed_at != 0U) &&
+            (done >= (s_bp_passed_at +
+                      subsystem5_mm_to_ticks(subsystem5_CAR_LENGTH_MM))))
+        {
+            subsystem5_bp_enter(BP_TURN_IN);
+        }
+        else if (done > subsystem5_mm_to_ticks(subsystem5_BYPASS_PASS_MAX_MM))
+        {
+            subsystem5_bypass_fail();    /* still beside it: too long */
+        }
+        break;
+    case BP_TURN_IN:
+        if (done >= s_bp_turn_ticks)
+        {
+            subsystem5_bp_enter(BP_SEEK);
+        }
+        break;
+    case BP_SEEK:
+        /* The line sensors are ahead of the wheels: when they find the
+           line, carry on until the wheels are on it, so the pivot leaves
+           the sensors on the line. */
+        if ((s_bp_line_at == 0U) &&
+            (get_line_barcode_data_safe().line_detected != 0U))
+        {
+            s_bp_line_at = (done > 0U) ? done : 1U;
+        }
+        if ((s_bp_line_at != 0U) &&
+            (done >= (s_bp_line_at +
+                      subsystem5_mm_to_ticks(subsystem5_SENSOR_TO_AXLE_MM))))
+        {
+            subsystem5_bp_enter(BP_ALIGN);
+        }
+        else if ((s_bp_line_at == 0U) &&
+                 (done > subsystem5_mm_to_ticks(s_bp_out_mm +
+                                                subsystem5_BYPASS_SEEK_EXTRA_MM)))
+        {
+            subsystem5_bypass_fail();    /* drove past where the line was */
+        }
+        break;
+    default:                              /* BP_ALIGN */
+        if (done >= s_bp_turn_ticks)
+        {
+            b2_stop();
+            tm_printf((UB*)"[S5] bypass done in %u ms, back on the line\n",
+                      (unsigned)(subsystem5_elapsed(s_bp_started_us, now_us) /
+                                 1000U));
+            subsystem5_reset_for_monitor();
+        }
+        break;
+    }
+}
+
+/* No safe side: back off a little and scan again (briefing: "plan stop,
+ * turn or reverse actions"). The motion is authorized, like the bypass. */
+static void subsystem5_reverse_begin(void)
+{
+    b2_command_t cmd;
+
+    subsystem5_memset(&cmd, 0, (int)sizeof(cmd));
+    cmd.type = B2_CMD_MOVE_BACKWARD;
+    cmd.distance_mm = subsystem5_REVERSE_MM;
+    cmd.goal_speed_mm_s = subsystem5_REVERSE_SPEED_MM_S;
+    cmd.timeout_ms = 3000U;
+    subsystem5_abort_pending_echo();
+    subsystem5_servo_set(90U);
+    tm_printf((UB*)"[S5] no safe side: reversing %u mm to rescan\n",
+              (unsigned)subsystem5_REVERSE_MM);
+    if (!b2_goal_start(&s_bypass_goal, &cmd))
+    {
+        subsystem5_fault(subsystem5_FAULT_NO_SAFE_SIDE);
+        return;
+    }
+    s_status.stop_required = 0U;      /* VC must not stop this motion */
+    s_status.state = subsystem5_STATE_REVERSE;
+}
+
+static void subsystem5_reverse_step(void)
+{
+    const b2_goal_result_t result = b2_goal_check(&s_bypass_goal);
+
+    if (!s1_mission_go())
+    {
+        b2_stop();
+        tm_printf((UB*)"[S5] STOP while reversing: cancelled\n");
+        subsystem5_reset_for_monitor();
     }
     else if (result == B2_GOAL_DONE)
     {
-        subsystem5_bypass_next();
+        s_status.stop_required = 1U;  /* still until the rescan is done */
+        s_scan_retries = 0U;
+        subsystem5_scan_start();
+    }
+    else if (result == B2_GOAL_FAILED)
+    {
+        b2_stop();
+        subsystem5_fault(subsystem5_FAULT_NO_SAFE_SIDE);
     }
     else
     {
-        /* Goal still running. */
+        /* still reversing */
     }
 }
 #endif /* APP_MISSION_ENABLE */
@@ -751,6 +1019,7 @@ void subsystem5_poll(void)
             s_status.stop_required = 1U;
             s_stop_request_us = now_us;
             s_scan_retries = 0U;
+            s_reverse_count = 0U;
             s_status.state = subsystem5_STATE_WAIT_STOP;
             subsystem5_send_event(subsystem5_EVENT_STOP_REQUIRED, subsystem5_FAULT_NONE);
             subsystem5_snapshot_update();
@@ -810,6 +1079,7 @@ void subsystem5_poll(void)
                         s_status.stop_required = 1U;
                         s_stop_request_us = now_us;
                         s_scan_retries = 0U;
+                        s_reverse_count = 0U;
                         s_status.state = subsystem5_STATE_WAIT_STOP;
                         subsystem5_send_event(subsystem5_EVENT_STOP_REQUIRED, subsystem5_FAULT_NONE);
                     }
@@ -858,6 +1128,10 @@ void subsystem5_poll(void)
     else if (s_status.state == subsystem5_STATE_BYPASS)
     {
         subsystem5_bypass_step(now_us);
+    }
+    else if (s_status.state == subsystem5_STATE_REVERSE)
+    {
+        subsystem5_reverse_step();
     }
 #endif
     else

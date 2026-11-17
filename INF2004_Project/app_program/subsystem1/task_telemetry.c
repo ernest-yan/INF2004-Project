@@ -166,6 +166,7 @@ LOCAL void send_status(UH session)
 	s.motion          = i.motion;
 	s.up_speed_mm_s   = i.up_speed_mm_s;
 	s.tilt_deg        = i.tilt_deg;
+	s.s5_fault        = u.fault;
 
 #if TLM_USE_JSON_STATUS
 	{

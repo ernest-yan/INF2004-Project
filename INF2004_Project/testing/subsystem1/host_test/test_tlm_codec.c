@@ -178,6 +178,7 @@ test_status_frame(void)
     s.motion = 3u;                 /* TURNING */
     s.up_speed_mm_s = 200u;        /* sent as 50 = 0b00110010 */
     s.tilt_deg = 33u;              /* 0b0100001 */
+    s.s5_fault = 6u;               /* 0b110 */
 
     n = tlm_encode_status(&s, buf, sizeof(buf));
     CHECK(n == TLM_STATUS_LEN);
@@ -185,7 +186,7 @@ test_status_frame(void)
     CHECK(buf[17] == 0x53u);       /* 01010011 */
     CHECK(buf[18] == 0x33u);       /* 0 011 + up speed 0011 */
     CHECK(buf[19] == 0x24u);       /* up speed 0010 + tilt 0100 */
-    CHECK(buf[20] == 0x20u);       /* tilt 001 + 5 padding bits */
+    CHECK(buf[20] == 0x38u);       /* tilt 001 + s5_fault 110 + 2 padding */
     s.yaw_dps = 1000;              /* out of range: must saturate to 255 */
     (void) tlm_encode_status(&s, buf, sizeof(buf));
     CHECK(buf[17] == 0xFFu && (buf[18] & 0x80u) != 0u);

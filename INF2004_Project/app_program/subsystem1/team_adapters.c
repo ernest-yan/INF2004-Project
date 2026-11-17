@@ -298,13 +298,13 @@ void ultra_get_status(ultra_status_t *p_out)
 
 	subsystem5_get_status(&s);
 
-	/* One OBSTACLE event per finished scan. */
-	if (s.scan_complete && !g_prev_scan) {
-		g_profile_count++;
-	}
-	g_prev_scan = (s.scan_complete != 0u);
+	/* One OBSTACLE event per measured profile (S5 counts them, so a
+	   profile is reported even when no safe side follows). */
+	(void)g_prev_scan;
+	g_profile_count = s.profile_count;
 
 	p_out->obstacle_state = (uint8_t)s.state;
+	p_out->fault          = (uint8_t)s.fault;
 	p_out->nearest_cm     = s.front_valid? (uint16_t)(s.front_mm / MM_PER_CM):
 					       (uint16_t)NO_ECHO_CM;
 	p_out->profile_count  = g_profile_count;

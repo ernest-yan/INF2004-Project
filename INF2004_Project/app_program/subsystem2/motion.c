@@ -30,6 +30,8 @@ static app_lock_t s_lock;
 #define B2_STOPPED_STABLE_MS  (200U)
 #define B2_MAX_DUTY          (1000U)
 #define B2_MIN_OUTPUT        (0U)
+#define B2_INTEGRAL_LIMIT     (8000)   /* PI integral clamp (anti-windup) */
+#define B2_INTEGRAL_RESET_MM_S (20)    /* request change that resets it */
 #define B2_GOAL_START_US     (100000ULL)
 
 static b2_config_t s_cfg;
@@ -437,6 +439,16 @@ static void b2_start_command(const b2_command_t *cmd, uint32_t tick_l,
         {
             s_wheel_started_us[i] = now;
         }
+        /* Anti-windup: the integral belongs to the old setpoint. When S3
+         * swaps a wheel between inner (30 / -40) and outer (70), the error
+         * stored while the slow wheel stalled pushed the new 70 mm/s
+         * request to 100-127 mm/s (2026-11-17 telemetry) and widened every
+         * zig-zag. A steady request (straight line, hump) keeps it. */
+        if (((previous[i] < 0) != (s_requested[i] < 0)) ||
+            (b2_abs32(s_requested[i] - previous[i]) >= B2_INTEGRAL_RESET_MM_S))
+        {
+            s_integral[i] = 0;
+        }
     }
     s_was_moving = true;
 }
@@ -563,7 +575,11 @@ void b2_poll(void)
                 continue;
             }
             const int32_t error = b2_abs32(request) - b2_abs32(actual[i]);
-            s_integral[i] = b2_clamp(s_integral[i] + error, -20000, 20000);
+            /* +-8000 * ki 8/256 = +-250 permil: room for a slope, but no
+             * longer enough to drive the motor on its own (was +-20000,
+             * = +-625 of the 650 permil maximum). */
+            s_integral[i] = b2_clamp(s_integral[i] + error,
+                                     -B2_INTEGRAL_LIMIT, B2_INTEGRAL_LIMIT);
             const int32_t ff = ((int32_t)s_cfg.max_pwm_permil *
                                 b2_abs32(request)) / s_cfg.max_speed_mm_s;
             const int32_t p = ((int32_t)s_cfg.kp_q8 * error) / 256;

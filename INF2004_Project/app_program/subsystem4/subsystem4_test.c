@@ -4,7 +4,8 @@
  *	Record results in testing/subsystem4/TEST_LOG.md.  IDs: S4-U01, ...
  *
  *	S4-U01/U02 need the GY-511 wired to GP26/GP27 and the robot kept still.
- *	S4-U03/U04 test the hump-profile maths with made-up data (no sensor).
+ *	S4-U03/U04/U13 test hump detection and height with a simulated car
+ *	rocking over the course hump (no sensor).
  *	S4-U05..U08 test lift / overturn detection with made-up data.
  *	S4-U09/U10 test turn rate and motion classification.
  */
@@ -13,20 +14,53 @@
 #include "terrain.h"
 #include "posture.h"
 #include "motion_class.h"
+#include "mathf.h"
 #include "../test_report.h"
 
 #if APP_TEST
 
-/* Feed n samples of the same pitch, step_mm of travel each */
-static bool feed(b4_terrain_t *m, float pitch, uint32_t step_mm, int n)
+/* Simulated hump crossing. The car (wheelbase L) drives at 70 mm/s over a
+   triangular hump (height H, length LEN) and rocks: pitch comes from the
+   height under the front and rear contacts. jitter_deg alternates sign
+   every sample (driving vibration). Returns the number of humps seen. */
+static float sim_h(float x, float H, float LEN)
 {
-	bool done = false;
-	int i;
+	if ((x <= 0.0f) || (x >= LEN)) { return 0.0f; }
+	return (x < (LEN * 0.5f)) ? (H * x / (LEN * 0.5f))
+				  : (H * (LEN - x) / (LEN * 0.5f));
+}
+
+static int sim_cross(b4_terrain_t *m, float H, float LEN, float L,
+		     float jitter_deg)
+{
+	const float step = 0.7f;		/* mm per 10 ms */
+	float x;				/* rear contact position */
+	float carry = 0.0f;
+	int i = 0, humps = 0;
+
+	for (x = -L - 150.0f; x < LEN + 450.0f; x += step, i++) {
+		const float rise = sim_h(x + L, H, LEN) - sim_h(x, H, LEN);
+		float p = b4_atan2f(rise, L) * 57.2957795f;
+		uint32_t mm;
+
+		p += ((i & 1) != 0) ? jitter_deg : -jitter_deg;
+		carry += step;
+		mm = (uint32_t)carry;
+		carry -= (float)mm;
+		if (b4_terrain_update(m, p, mm, (uint16_t)L)) { humps++; }
+	}
+	return humps;
+}
+
+/* Feed n samples of the same pitch, step_mm of travel each */
+static int feed(b4_terrain_t *m, float pitch, uint32_t step_mm, int n)
+{
+	int humps = 0, i;
 
 	for (i = 0; i < n; i++) {
-		done |= b4_terrain_update(m, pitch, step_mm);
+		if (b4_terrain_update(m, pitch, step_mm, 130U)) { humps++; }
 	}
-	return done;
+	return humps;
 }
 
 /* Feed n identical accelerometer samples; return the last result and the
@@ -70,23 +104,113 @@ EXPORT void subsystem4_test(void)
 			   "calibrated, |a| between 0.7 g and 1.3 g at rest");
 	}
 
-	/* S4-U03: 10 x 10 mm at +10 deg, then down, then level = one hump.
-	   The first 2 climb samples only arm the detector, so the expected
-	   height is 8 x 10 mm x sin(10 deg) = 13.9 mm -> 14 mm. */
+	/* S4-U03: the course hump, 10 mm over 200 mm, wheelbase 130 mm, with
+	   +-1.5 deg driving vibration: one hump, 10 mm +- 2 mm. */
 	b4_terrain_init(&m);
 	{
-		bool done = feed(&m, 10.0f, 10U, 10);	/* climb */
-		done |= feed(&m, -10.0f, 10U, 10);	/* descend */
-		done |= feed(&m, 0.0f, 10U, 3);		/* level again */
-		TEST_CHECK("S4-U03", done && m.last_peak_mm >= 13U &&
-			   m.last_peak_mm <= 15U,
-			   "hump detected, height 13-15 mm");
+		const int n = sim_cross(&m, 10.0f, 200.0f, 130.0f, 1.5f);
+		TEST_CHECK("S4-U03", (n == 1) && (m.last_peak_mm >= 8U) &&
+			   (m.last_peak_mm <= 12U) &&
+			   (m.last_gap_mm >= 110U) && (m.last_gap_mm <= 150U),
+			   "course hump: 10 mm +-2, peaks ~1 wheelbase apart");
 	}
 
-	/* S4-U04: flat ground never reports a hump */
+	/* S4-U04: flat ground with +-2 deg vibration never reports a hump */
 	b4_terrain_init(&m);
-	TEST_CHECK("S4-U04", !feed(&m, 1.0f, 10U, 200) && m.max_peak_mm == 0U,
-		   "level travel reports no hump");
+	TEST_CHECK("S4-U04", (sim_cross(&m, 0.0f, 200.0f, 130.0f, 2.0f) == 0) &&
+		   (m.max_peak_mm == 0U),
+		   "level travel with vibration reports no hump");
+
+	/* S4-U14: the car stops 3 cm past the hump (line lost) and stays
+	   still, slightly tilted: the hump is still measured. */
+	b4_terrain_init(&m);
+	{
+		const float L = 130.0f, step = 0.7f;
+		float x, carry = 0.0f;
+		int n = 0, i = 0;
+
+		for (x = -L - 150.0f; x < 230.0f; x += step, i++) {
+			const float rise = sim_h(x + L, 10.0f, 200.0f) -
+					   sim_h(x, 10.0f, 200.0f);
+			float p = b4_atan2f(rise, L) * 57.2957795f;
+			uint32_t mm;
+
+			p += ((i & 1) != 0) ? 1.5f : -1.5f;
+			carry += step;
+			mm = (uint32_t)carry;
+			carry -= (float)mm;
+			if (b4_terrain_update(&m, p, mm, 130U)) { n++; }
+		}
+		n += feed(&m, -1.5f, 0U, 150);		/* stopped 1.5 s */
+		TEST_CHECK("S4-U14", (n == 1) && (m.last_peak_mm >= 8U) &&
+			   (m.last_peak_mm <= 12U),
+			   "stops just past the hump: still measured");
+	}
+
+	/* S4-U15: drives 60 mm nose-down (drive wheels climbing), stalls, is
+	   picked up (+-15 deg, wheels still) and put back: measured once
+	   from the driving part only (130 x sin 5 deg = 11 mm), then the
+	   next crossing is measured on its own. */
+	b4_terrain_init(&m);
+	{
+		int n = feed(&m, 0.0f, 1U, 50);
+		n += feed(&m, -5.0f, 1U, 60);		/* driving, nose down */
+		n += feed(&m, -5.0f, 0U, 50);		/* stalled */
+		n += feed(&m, 15.0f, 0U, 30);		/* picked up */
+		n += feed(&m, -15.0f, 0U, 30);
+		n += feed(&m, 0.0f, 0U, 100);		/* put down, still */
+		TEST_CHECK("S4-U15", (n == 1) && (m.last_peak_mm >= 10U) &&
+			   (m.last_peak_mm <= 12U) &&
+			   (m.phase == B4_TERRAIN_LEVEL) &&
+			   (sim_cross(&m, 10.0f, 200.0f, 130.0f, 1.5f) == 1) &&
+			   (m.last_peak_mm >= 8U) && (m.last_peak_mm <= 12U),
+			   "stall: driving part measured, handling ignored");
+	}
+
+	/* S4-U16: what this car really does: the front caster barely moves,
+	   only the rear drive wheels (radius 32 mm) climb a narrow 10 mm
+	   ridge (30 mm wide), wheelbase 96 mm. Nose-down half only. */
+	b4_terrain_init(&m);
+	{
+		const float L = 96.0f, r = 32.0f, step = 0.7f;
+		float x, carry = 0.0f;
+		int n = 0, i = 0;
+
+		for (x = -100.0f; x < 400.0f; x += step, i++) {
+			/* wheel centre rise over the ridge (wheel envelope) */
+			float u, rear = 0.0f, p;
+			uint32_t mm;
+			for (u = 0.0f; u <= 30.0f; u += 1.0f) {
+				const float d = u - x;
+				if ((d > -r) && (d < r)) {
+					const float z = sim_h(u, 10.0f, 30.0f) +
+						b4_sqrtf((r * r) - (d * d)) - r;
+					if (z > rear) { rear = z; }
+				}
+			}
+			p = -b4_atan2f(rear, L) * 57.2957795f;
+			p += ((i & 1) != 0) ? 1.0f : -1.0f;
+			carry += step;
+			mm = (uint32_t)carry;
+			carry -= (float)mm;
+			if (b4_terrain_update(&m, p, mm, (uint16_t)L)) { n++; }
+		}
+		TEST_CHECK("S4-U16", (n == 1) && (m.last_peak_mm >= 8U) &&
+			   (m.last_peak_mm <= 12U),
+			   "drive wheels over a 10 mm ridge: 10 mm +-2");
+	}
+
+	/* S4-U13: pulling away (+5 deg) and braking (-5 deg) tilt the car
+	   over only ~12 mm of travel: never a hump. */
+	b4_terrain_init(&m);
+	{
+		int n = feed(&m, 5.0f, 1U, 12);		/* ~12 mm of travel */
+		n += feed(&m, 0.0f, 1U, 300);
+		n += feed(&m, -5.0f, 1U, 12);
+		n += feed(&m, 0.0f, 1U, 300);
+		TEST_CHECK("S4-U13", (n == 0) && (m.max_peak_mm == 0U),
+			   "pulling away / braking: no hump");
+	}
 
 	/* Same thresholds as subsystem4_init(). Level robot: gravity on +Z. */
 	{

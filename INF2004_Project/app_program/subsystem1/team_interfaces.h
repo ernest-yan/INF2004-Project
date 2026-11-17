@@ -134,9 +134,11 @@ void imu_get_status(imu_status_t *p_out);
 /* ---------- UltrasonicScan (Buddy 5) ---------- */
 typedef struct
 {
-    uint8_t  obstacle_state;  /* MONITOR..FAULT_STOP, 8 values -> 3 bits */
+    uint8_t  obstacle_state;  /* MONITOR..REVERSE, 8 values -> 3 bits */
+    uint8_t  fault;           /* subsystem5_fault_t, 7 values -> 3 bits */
     uint16_t nearest_cm;
-    uint16_t profile_count;   /* +1 per completed profile (event trigger) */
+    uint16_t profile_count;   /* +1 per measured profile (event trigger),
+                                 also when no bypass follows */
     uint8_t  centre_deg;
     uint8_t  width_cm;
     uint16_t clear_l_cm;

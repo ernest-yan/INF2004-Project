@@ -92,7 +92,7 @@ static void b4_fault(b4_fault_t fault)
     s_status.state = B4_STATE_FAULT;
     s_status.fault = fault;
     if (s_urgent != NULL) { s_urgent(s_context); }
-    const b4_event_t ev = {B4_EVENT_SENSOR_FAULT, 0U, B4_LIFT_NONE, fault};
+    const b4_event_t ev = {B4_EVENT_SENSOR_FAULT, 0U, 0, 0, 0U, B4_LIFT_NONE, fault};
     b4_publish(ev);
 }
 static void b4_calibration_restart(void)
@@ -141,7 +141,8 @@ bool b4_init(const b4_config_t *cfg, b4_event_publish_fn publish,
         (cfg->lift_tilt_deg < 10U) ||
         (cfg->overturn_tilt_deg <= cfg->lift_tilt_deg) ||
         (cfg->overturn_tilt_deg > 170U) ||
-        (cfg->wheel_track_mm == 0U))
+        (cfg->wheel_track_mm == 0U) ||
+        (cfg->wheelbase_mm < 50U) || (cfg->wheelbase_mm > 400U))
     {
         return false;
     }
@@ -327,7 +328,7 @@ void b4_poll(void)
         if (s_urgent != NULL) { s_urgent(s_context); }
         b4_set_motion((cause == B4_LIFT_OVERTURNED) ? B4_MOTION_OVERTURNED
                                                     : B4_MOTION_LIFTED, true);
-        const b4_event_t ev = {B4_EVENT_LIFTED, 0U, cause, B4_FAULT_NONE};
+        const b4_event_t ev = {B4_EVENT_LIFTED, 0U, 0, 0, 0U, cause, B4_FAULT_NONE};
         b4_publish(ev);
         return;
     }
@@ -343,11 +344,14 @@ void b4_poll(void)
     const uint32_t step_mm = travel_now - s_prev_travel_mm;
     s_prev_travel_mm = travel_now;
     const uint32_t safe_step = (step_mm <= B4_MAX_TRAVEL_STEP_MM) ? step_mm : 0U;
-    if (b4_terrain_update(&s_terrain, s_pitch_filtered, safe_step))
+    if (b4_terrain_update(&s_terrain, s_pitch_filtered, safe_step,
+                          s_cfg.wheelbase_mm))
     {
         s_status.hump_count++;
         const b4_event_t ev = {B4_EVENT_HUMP_COMPLETE,
-            s_terrain.last_peak_mm, B4_LIFT_NONE, B4_FAULT_NONE};
+            s_terrain.last_peak_mm, s_terrain.last_max_cdeg,
+            s_terrain.last_min_cdeg, s_terrain.last_gap_mm,
+            B4_LIFT_NONE, B4_FAULT_NONE};
         b4_publish(ev);
     }
     s_status.last_hump_height_mm = s_terrain.last_peak_mm;

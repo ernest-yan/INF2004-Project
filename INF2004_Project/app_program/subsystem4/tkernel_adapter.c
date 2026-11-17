@@ -45,7 +45,15 @@ static bool subsystem4_event(const b4_event_t *ev, void *context)
     (void)context;
     switch (ev->type) {
     case B4_EVENT_HUMP_COMPLETE:
-        tm_printf((UB*)"[S4] hump complete: %u mm\n", (unsigned)ev->height_mm);
+        tm_printf((UB*)"[S4] hump complete: %u mm (peak tilt +%d.%02d / "
+                  "-%d.%02d deg, peaks %u mm apart; wheelbase set to %u mm)\n",
+                  (unsigned)ev->height_mm,
+                  (int)(ev->max_pitch_cdeg / 100),
+                  (int)(ev->max_pitch_cdeg % 100),
+                  (int)(-ev->min_pitch_cdeg / 100),
+                  (int)(-ev->min_pitch_cdeg % 100),
+                  (unsigned)ev->peak_gap_mm,
+                  (unsigned)s4_config.wheelbase_mm);
         break;
     case B4_EVENT_LIFTED:
         tm_printf((UB*)"[S4] %s - motors stopped (RESET to clear)\n",
@@ -154,6 +162,7 @@ EXPORT ER subsystem4_init(void)
     s4_config.lift_tilt_deg = 30U;
     s4_config.overturn_tilt_deg = 60U;
     s4_config.wheel_track_mm = S4_WHEEL_TRACK_MM;
+    s4_config.wheelbase_mm = S4_WHEELBASE_MM;
     /* GY-511 is mounted with its pin header across the car, so the chip's
        Y axis is the car's forward axis.  Nose-up must give positive pitch:
        if it reads negative, set forward_axis_sign = 0U. */
