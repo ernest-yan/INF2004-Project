@@ -145,7 +145,7 @@ LOCAL void send_status(UH session)
 	imu_get_status(&i);
 	ultra_get_status(&u);
 
-	dist_cm = m.distance_mm / 10u;
+	dist_cm = m.distance_cm;
 	s.session         = session;
 	s.seq             = g_seq_status++;
 	s.vehicle_state   = v.state;

@@ -13,6 +13,7 @@
 #include "../subsystem3/line_barcode.h"
 #include "../subsystem4/tkernel_adapter.h"
 #include "../subsystem5/ultrasonic.h"
+#include "../subsystem1/team_interfaces.h"	/* CR1: system_fault_mask() */
 
 static ID	vc_tid;
 
@@ -100,6 +101,9 @@ static void vc_print_health(void)
 		  (int)s4.acceleration_z_mg,
 		  (int)s5.state, (unsigned)s5.front_mm,
 		  s5.front_valid ? "mm" : "(invalid)");
+	/* CR1: one bit per fault condition, all subsystems (SYS_FLT_*). */
+	tm_printf((UB*)"[VC] system faults 0x%04x\n",
+		  (unsigned)system_fault_mask());
 }
 
 static void vc_task(INT stacd, void *exinf)

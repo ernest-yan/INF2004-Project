@@ -11,6 +11,13 @@ trap 'rm -rf "$OUT"' EXIT
 CC="gcc -std=gnu11 -Wall -Wextra -O2"
 fail=0
 
+echo "== S1 telemetry codec (unchanged wire format) =="
+$CC -I"$PROJ/app_program/subsystem1" "$PROJ/app_program/subsystem1/tlm_codec.c" \
+    "$PROJ/testing/subsystem1/host_test/test_tlm_codec.c" -o "$OUT/codec" && "$OUT/codec" | tail -1 || fail=1
+
+echo "== S1 adapters + system fault mask =="
+$CC "$HERE/test_s1_adapters.c" -o "$OUT/s1" && "$OUT/s1" || fail=1
+
 echo "== S2 motion =="
 $CC "$HERE/test_s2_motion.c" "$PROJ/app_program/subsystem2/math.c" -o "$OUT/s2" && "$OUT/s2" || fail=1
 

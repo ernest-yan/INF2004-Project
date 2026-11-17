@@ -43,18 +43,46 @@ typedef struct
     uint32_t t_rx_us;    /* time (us) when the request was received */
 } vehicle_event_t;       /* 8 bytes -> qVehicleEvent message size */
 
+/* CR1: the team structs below are filled and read only by our telemetry
+ * task (single writer), and sized to their MQTT field widths. */
 typedef struct
 {
-    uint8_t state;       /* vehicle_state_t */
-    bool    b_estop_latched;
-    uint8_t estop_source; /* event_source_t of the latched E-STOP */
-    uint8_t fault_mask;   /* TLM_FAULT_Sn: bit n = subsystem n has a fault */
-} vehicle_status_t;
+    uint8_t state : 3;            /* vehicle_state_t, 7 values */
+    uint8_t b_estop_latched : 1;
+    uint8_t estop_source : 3;     /* event_source_t of the latched E-STOP */
+    uint8_t : 1;
+    uint8_t fault_mask;           /* TLM_FAULT_Sn: bit n = subsystem n has a fault */
+} vehicle_status_t;               /* CR1: 4 -> 2 bytes */
 
 #define TLM_FAULT_S2    (1u << 2)
 #define TLM_FAULT_S3    (1u << 3)
 #define TLM_FAULT_S4    (1u << 4)
 #define TLM_FAULT_S5    (1u << 5)
+
+/* CR1: SYSTEM FAULT BITMASK -- one bit per fault condition, all subsystems
+ * (testing/cr1/DATA_REPRESENTATION.md). Built on demand from each
+ * subsystem's own fault bitmask, so it has no writer of its own and needs
+ * no lock. The MQTT fault_mask byte (TLM_FAULT_Sn) is derived from it. */
+#define SYS_FLT_MOTOR_STALL     (1u << 0)   /* S2 encoder stall */
+#define SYS_FLT_GOAL_TIMEOUT    (1u << 1)   /* S2 */
+#define SYS_FLT_S2_CONFIG       (1u << 2)   /* S2 */
+#define SYS_FLT_S2_EVENT_LOSS   (1u << 3)   /* S2 */
+#define SYS_FLT_LINE_LOSS       (1u << 4)   /* S3 (a state, not a fault) */
+#define SYS_FLT_IMU_I2C         (1u << 5)   /* S4 */
+#define SYS_FLT_IMU_CONFIG      (1u << 6)   /* S4 */
+#define SYS_FLT_IMU_QUEUE       (1u << 7)   /* S4 */
+#define SYS_FLT_NO_ECHO         (1u << 8)   /* S5 */
+#define SYS_FLT_SCAN_INVALID    (1u << 9)   /* S5 */
+#define SYS_FLT_STOP_TIMEOUT    (1u << 10)  /* S5 */
+#define SYS_FLT_S5_EVENT        (1u << 11)  /* S5 */
+#define SYS_FLT_NO_SAFE_SIDE    (1u << 12)  /* S5 */
+#define SYS_FLT_BYPASS          (1u << 13)  /* S5 */
+#define SYS_FLT_WIFI_LOSS       (1u << 14)  /* S1: MQTT not connected */
+#define SYS_FLT_S2_ALL          (0x000Fu)
+#define SYS_FLT_S4_ALL          (0x00E0u)
+#define SYS_FLT_S5_ALL          (0x3F00u)
+
+uint16_t system_fault_mask(void);
 
 /* Remote START / STOP: set / clear s1_mission_go() (STOP also b2_stop()).
  * START is refused (false) while the car is in SAFE_STOP. */
@@ -77,12 +105,12 @@ void vehicle_get_status(vehicle_status_t *p_out);
 /* ---------- MotionControl (Buddy 2) ---------- */
 typedef struct
 {
-    uint16_t speed_l_mm_s;
-    uint16_t speed_r_mm_s;
-    uint32_t enc_l;
-    uint32_t enc_r;
-    uint32_t distance_mm;
-} motion_status_t;
+    uint16_t enc_l;               /* 16 bits, wraps (as on the wire) */
+    uint16_t enc_r;
+    uint32_t speed_l_mm_s : 10;   /* 0..1023, saturates */
+    uint32_t speed_r_mm_s : 10;
+    uint32_t distance_cm : 12;    /* 0..4095, saturates */
+} motion_status_t;                /* CR1: 16 -> 8 bytes */
 
 void motion_get_status(motion_status_t *p_out);
 
@@ -107,44 +135,48 @@ typedef enum
 
 typedef struct
 {
-    uint8_t  line_state;     /* line_state_t */
-    uint8_t  last_barcode;   /* barcode_cmd_t */
-    uint16_t barcode_count;  /* +1 per decoded barcode (event trigger) */
-} line_status_t;
+    uint8_t line_state : 2;  /* line_state_t */
+    uint8_t last_barcode : 3; /* barcode_cmd_t */
+    uint8_t : 3;
+    uint8_t barcode_count;   /* +1 per decoded barcode (event trigger), wraps */
+} line_status_t;             /* CR1: 4 -> 2 bytes */
 
 void line_get_status(line_status_t *p_out);
 
 /* ---------- ImuTerrain (Buddy 4) ---------- */
 typedef struct
 {
+    int16_t  yaw_dps;        /* turn rate, + = left (from wheel speeds) */
+    uint16_t up_speed_mm_s : 10; /* lift signal: recent upward speed, 0 if
+                                    down; 0..1023 (wire sends /4) */
+    uint16_t lift_cause : 2; /* 0 none, 1 lifted, 2 overturned */
+    uint16_t motion : 3;     /* b4_motion_t: 7 values */
+    uint16_t : 1;
     int8_t   pitch_deg;
     uint8_t  hump_max_mm;    /* highest hump so far (FR5) */
     uint8_t  last_hump_mm;   /* height of the last completed hump */
-    uint16_t hump_count;     /* +1 per completed hump (event trigger) */
-    uint16_t lift_count;     /* +1 per lift/overturn latch (event trigger) */
-    uint8_t  lift_cause;     /* 0 none, 1 lifted, 2 overturned */
-    int16_t  yaw_dps;        /* turn rate, + = left (from wheel speeds) */
-    uint8_t  motion;         /* b4_motion_t: 7 values -> 3 bits */
-    uint16_t up_speed_mm_s;  /* lift signal: recent upward speed, 0 if down */
+    uint8_t  hump_count;     /* +1 per completed hump (event trigger), wraps */
+    uint8_t  lift_count;     /* +1 per lift/overturn latch (event trigger) */
     uint8_t  tilt_deg;       /* lift signal: tilt in any direction, 0..180 */
-} imu_status_t;
+} imu_status_t;              /* CR1: 18 -> 10 bytes */
 
 void imu_get_status(imu_status_t *p_out);
 
 /* ---------- UltrasonicScan (Buddy 5) ---------- */
 typedef struct
 {
-    uint8_t  obstacle_state;  /* MONITOR..REVERSE, 8 values -> 3 bits */
-    uint8_t  fault;           /* subsystem5_fault_t, 7 values -> 3 bits */
-    uint16_t nearest_cm;
-    uint16_t profile_count;   /* +1 per measured profile (event trigger),
-                                 also when no bypass follows */
+    uint32_t nearest_cm : 9;  /* 0..511 (0x1FF = no echo) */
+    uint32_t clear_l_cm : 9;  /* 0..400 */
+    uint32_t clear_r_cm : 9;
+    uint32_t : 5;
+    uint8_t  obstacle_state : 3; /* MONITOR..REVERSE, 8 values */
+    uint8_t  fault : 3;       /* subsystem5_fault_t, 7 values */
+    uint8_t  decision : 2;    /* S5 candidate side: 0 none, 1 left, 2 right */
+    uint8_t  profile_count;   /* +1 per measured profile (event trigger),
+                                 also when no bypass follows; wraps */
     uint8_t  centre_deg;
     uint8_t  width_cm;
-    uint16_t clear_l_cm;
-    uint16_t clear_r_cm;
-    uint8_t  decision;        /* S5 candidate side: 0 none, 1 left, 2 right */
-} ultra_status_t;
+} ultra_status_t;             /* CR1: 14 -> 8 bytes */
 
 void ultra_get_status(ultra_status_t *p_out);
 
