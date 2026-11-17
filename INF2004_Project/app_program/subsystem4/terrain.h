@@ -45,17 +45,21 @@ typedef struct
     float pitch_deg;           /* extra low-pass on the caller's pitch. */
     float max_pitch_deg;       /* most nose-up this hump. */
     float min_pitch_deg;       /* most nose-down this hump. */
-    uint32_t path_mm;          /* travel since the hump started. */
-    uint32_t max_at_mm;        /* path_mm when max_pitch_deg was seen. */
-    uint32_t min_at_mm;        /* path_mm when min_pitch_deg was seen. */
-    uint32_t up_mm;            /* travel while nose-up beyond threshold. */
-    uint32_t down_mm;          /* travel while nose-down beyond threshold. */
-    uint16_t start_samples;
-    uint16_t still_samples;    /* consecutive samples with no travel. */
-    uint32_t clear_mm;         /* travel since the last clear tilt. */
-    uint16_t peak_mm;          /* height estimate so far, this hump. */
-    uint16_t max_peak_mm;      /* highest completed hump. */
-    uint16_t last_peak_mm;     /* last completed hump. */
+    /* CR1: every travel counter is <= ~700 mm (a hump longer than
+       B4_HUMP_MAX_PATH_MM = 600 mm is dropped and re-armed), so 16 bits;
+       sample counters saturate at 255 (largest threshold is 100);
+       heights saturate at 255 mm (B4_MAX_HUMP_MM is 150). */
+    uint16_t path_mm;          /* travel since the hump started. */
+    uint16_t max_at_mm;        /* path_mm when max_pitch_deg was seen. */
+    uint16_t min_at_mm;        /* path_mm when min_pitch_deg was seen. */
+    uint16_t up_mm;            /* travel while nose-up beyond threshold. */
+    uint16_t down_mm;          /* travel while nose-down beyond threshold. */
+    uint16_t clear_mm;         /* travel since the last clear tilt. */
+    uint8_t start_samples;
+    uint8_t still_samples;     /* consecutive samples with no travel. */
+    uint8_t peak_mm;           /* height estimate so far, this hump. */
+    uint8_t max_peak_mm;       /* highest completed hump. */
+    uint8_t last_peak_mm;      /* last completed hump. */
     /* Summary of the last completed hump (console, for tuning). */
     int16_t last_max_cdeg;
     int16_t last_min_cdeg;

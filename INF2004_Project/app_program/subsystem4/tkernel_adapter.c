@@ -22,7 +22,27 @@
 #include "../subsystem2/tkernel_adapter.h"
 
 static ID s4_task_id;
-static b4_config_t s4_config;
+/* CR1 (R9): calibration is constant, so it lives in flash; b4_init keeps a
+   pointer to it instead of a RAM copy. */
+static const b4_config_t s4_config = {
+    .i2c_addr = B4_ACCEL_ADDR_DEFAULT,
+    .i2c_speed_khz = 100U,
+    /* Lift / overturn: PROVISIONAL, tune on the robot (S4-M01..M04).
+       lift_tilt_deg must stay above the steepest hump on the course. */
+    .lift_accel_mg = 250U,
+    /* A hand lift is 200-500 mm/s; a hump at line speed is ~20 mm/s. */
+    .lift_speed_mm_s = 150U,
+    .lift_tilt_deg = 30U,
+    .overturn_tilt_deg = 60U,
+    .wheel_track_mm = S4_WHEEL_TRACK_MM,
+    .wheelbase_mm = S4_WHEELBASE_MM,
+    /* GY-511 is mounted with its pin header across the car, so the chip's
+       Y axis is the car's forward axis.  Nose-up must give positive pitch:
+       if it reads negative, set forward_axis_sign = 0U. */
+    .forward_axis_is_y = 1U,
+    .forward_axis_sign = 1U,
+    .calibration_samples = 50U
+};
 static volatile BOOL s4_hw_ready = FALSE;
 
 EXPORT BOOL s4_ready(void)
@@ -153,23 +173,7 @@ static void subsystem4_task(INT stacd, void *exinf)
 
 EXPORT ER subsystem4_init(void)
 {
-    s4_config.i2c_addr = B4_ACCEL_ADDR_DEFAULT;
-    s4_config.i2c_speed_khz = 100U;
-    /* Lift / overturn: PROVISIONAL, tune on the robot (S4-M01..M04).
-       lift_tilt_deg must stay above the steepest hump on the course. */
-    s4_config.lift_accel_mg = 250U;
-    /* A hand lift is 200-500 mm/s; a hump at line speed is ~20 mm/s. */
-    s4_config.lift_speed_mm_s = 150U;
-    s4_config.lift_tilt_deg = 30U;
-    s4_config.overturn_tilt_deg = 60U;
-    s4_config.wheel_track_mm = S4_WHEEL_TRACK_MM;
-    s4_config.wheelbase_mm = S4_WHEELBASE_MM;
-    /* GY-511 is mounted with its pin header across the car, so the chip's
-       Y axis is the car's forward axis.  Nose-up must give positive pitch:
-       if it reads negative, set forward_axis_sign = 0U. */
-    s4_config.forward_axis_is_y = 1U;
-    s4_config.forward_axis_sign = 1U;
-    s4_config.calibration_samples = 50U;
+    /* CR1: s4_config is a const initialiser now */
     return E_OK;
 }
 

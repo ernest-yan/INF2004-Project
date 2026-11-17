@@ -20,16 +20,18 @@
 #define B4_PITCH_ALPHA         (0.1f)   /* +100 ms smoothing at 100 Hz */
 #define B4_DEG_TO_RAD          (0.0174532925f)
 
-static uint16_t b4_u16_round(float v)
+/* CR1: heights are 8-bit (0..255 mm), saturating. */
+static uint8_t b4_u8_round(float v)
 {
     if (v <= 0.0f) { return 0U; }
-    if (v >= 65535.0f) { return 65535U; }
-    return (uint16_t)(v + 0.5f);
+    if (v >= 255.0f) { return 255U; }
+    return (uint8_t)(v + 0.5f);
 }
 
-static uint16_t b4_inc(uint16_t n)
+/* CR1: 8-bit saturating sample counter. */
+static uint8_t b4_inc(uint8_t n)
 {
-    return (n < 65535U) ? (uint16_t)(n + 1U) : n;
+    return (n < 255U) ? (uint8_t)(n + 1U) : n;
 }
 
 static float b4_height_mm(const b4_terrain_t *m, uint16_t wheelbase_mm)
@@ -106,7 +108,7 @@ bool b4_terrain_update(b4_terrain_t *model, float pitch_deg,
         }
     }
 
-    m->path_mm += step_mm;
+    m->path_mm = (uint16_t)(m->path_mm + step_mm);  /* step <= 100 */
     if (m->path_mm > B4_HUMP_MAX_PATH_MM)
     {
         /* Too long for a hump: a ramp, a slope, or noise. Never report. */
@@ -122,16 +124,16 @@ bool b4_terrain_update(b4_terrain_t *model, float pitch_deg,
         if (p < m->min_pitch_deg) { m->min_pitch_deg = p; m->min_at_mm = m->path_mm; }
         if (p >= B4_HUMP_START_DEG)
         {
-            m->up_mm += step_mm;
+            m->up_mm = (uint16_t)(m->up_mm + step_mm);
             m->phase = B4_TERRAIN_CLIMB;
         }
         else if (p <= -B4_HUMP_START_DEG)
         {
-            m->down_mm += step_mm;
+            m->down_mm = (uint16_t)(m->down_mm + step_mm);
             m->phase = B4_TERRAIN_DESCEND;
         }
     }
-    m->peak_mm = b4_u16_round(b4_height_mm(m, wheelbase_mm));
+    m->peak_mm = b4_u8_round(b4_height_mm(m, wheelbase_mm));
 
     /* Finished after enough travel with no clear tilt (small wobble does
        not count), or when the car has stopped after both phases. */
@@ -141,7 +143,7 @@ bool b4_terrain_update(b4_terrain_t *model, float pitch_deg,
     }
     else
     {
-        m->clear_mm += step_mm;
+        m->clear_mm = (uint16_t)(m->clear_mm + step_mm);
     }
     m->still_samples = moving ? 0U : b4_inc(m->still_samples);
     {
@@ -168,7 +170,7 @@ bool b4_terrain_update(b4_terrain_t *model, float pitch_deg,
                               (h <= B4_MAX_HUMP_MM);
         if (complete)
         {
-            const uint16_t peak = b4_u16_round(h);
+            const uint8_t peak = b4_u8_round(h);
             m->last_peak_mm = peak;
             if (peak > m->max_peak_mm) { m->max_peak_mm = peak; }
             m->last_max_cdeg = (int16_t)(m->max_pitch_deg * 100.0f);

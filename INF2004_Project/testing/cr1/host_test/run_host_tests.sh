@@ -44,4 +44,19 @@ else
     echo "S3: old and new decoders DIFFER:"; head -20 "$OUT/s3_diff.txt"; fail=1
 fi
 
+echo "== S4 IMU (lift / overturn / hump): pre-cr1 vs CR1 =="
+$S3CC -I"$OUT/oldtree/INF2004_Project/app_program/subsystem4" "$HERE/s4_driver.c" -o "$OUT/s4_old"
+$S3CC -I"$PROJ/app_program/subsystem4" "$HERE/s4_driver.c" -o "$OUT/s4_new"
+"$OUT/s4_old" > "$OUT/s4_old.txt"
+"$OUT/s4_new" > "$OUT/s4_new.txt"
+lines=$(wc -l < "$OUT/s4_new.txt")
+lifts=$(grep -c 'EVENT type=1' "$OUT/s4_new.txt" || true)
+humps=$(grep -c 'EVENT type=0' "$OUT/s4_new.txt" || true)
+if diff "$OUT/s4_old.txt" "$OUT/s4_new.txt" > "$OUT/s4_diff.txt" &&
+   grep -q 'lock errors (nested or unbalanced): 0 / depth 0' "$OUT/s4_new.txt"; then
+    echo "S4: 12 simulated runs, $lines status/event lines IDENTICAL ($humps humps, $lifts lift/overturn stops); locks balanced"
+else
+    echo "S4: old and new DIFFER or lock error:"; head -20 "$OUT/s4_diff.txt"; tail -1 "$OUT/s4_new.txt"; fail=1
+fi
+
 [ $fail -eq 0 ] && echo "ALL CR1 HOST TESTS PASSED" || { echo "CR1 HOST TESTS FAILED"; exit 1; }

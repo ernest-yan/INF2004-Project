@@ -138,7 +138,7 @@ bool safety_reset_while_stopped(void)
 		tm_printf((UB*)"[S1] RESET refused: wheels still moving\n");
 		return false;
 	}
-	if (i.lift_latched || (i.fault != B4_FAULT_NONE)) {
+	if (i.lift_latched || (i.fault_mask != 0u)) {
 		/* S4 recalibrates next: the car must be back on the ground
 		   and still for ~0.5 s. */
 		(void)b4_authorized_reset_while_stopped();
@@ -207,7 +207,7 @@ void vehicle_get_status(vehicle_status_t *p_out)
 	if ((l.fault_mask & (uint8_t)~FAULT_LINE_LOSS) != 0u) {
 		faults |= TLM_FAULT_S3;	/* line loss is not a fault: see line */
 	}
-	if (i.fault != B4_FAULT_NONE) {
+	if (i.fault_mask != 0u) {
 		faults |= TLM_FAULT_S4;
 	}
 	if (u.fault_mask != 0u) {
