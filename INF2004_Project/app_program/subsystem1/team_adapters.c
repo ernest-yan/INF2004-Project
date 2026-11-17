@@ -148,7 +148,7 @@ bool safety_reset_while_stopped(void)
 	}
 	g_remote_estop = FALSE;
 	tm_printf((UB*)"[S1] RESET done (brake %d, lift %d, S5 fault %d), send START to drive\n",
-		  (int)m.brake_latched, (int)i.lift_latched, (int)u.fault);
+		  (int)m.brake_latched, (int)i.lift_latched, (int)u.fault_mask);
 	return true;
 }
 
@@ -210,7 +210,7 @@ void vehicle_get_status(vehicle_status_t *p_out)
 	if (i.fault != B4_FAULT_NONE) {
 		faults |= TLM_FAULT_S4;
 	}
-	if (u.fault != subsystem5_FAULT_NONE) {
+	if (u.fault_mask != 0u) {
 		faults |= TLM_FAULT_S5;
 	}
 	p_out->fault_mask = faults;
@@ -304,7 +304,7 @@ void ultra_get_status(ultra_status_t *p_out)
 	g_profile_count = s.profile_count;
 
 	p_out->obstacle_state = (uint8_t)s.state;
-	p_out->fault          = (uint8_t)s.fault;
+	p_out->fault          = subsystem5_first_fault(s.fault_mask);
 	p_out->nearest_cm     = s.front_valid? (uint16_t)(s.front_mm / MM_PER_CM):
 					       (uint16_t)NO_ECHO_CM;
 	p_out->profile_count  = g_profile_count;

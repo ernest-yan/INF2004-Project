@@ -15,6 +15,12 @@
 #define subsystem5_MIN_SIDE_RAYS  (1U)
 #define subsystem5_PI_F           (3.14159265f)
 
+/* CR1: a computed distance into a 12-bit field, saturating (never wraps). */
+static uint32_t subsystem5_dist_field(uint32_t mm)
+{
+    return (mm > subsystem5_DIST_FIELD_MAX) ? subsystem5_DIST_FIELD_MAX : mm;
+}
+
 /* cos(deg) for 0..180 deg as sin(90 - deg), Taylor to x^9 (no libm here). */
 float subsystem5_cosd(float deg)
 {
@@ -83,7 +89,7 @@ static void subsystem5_edge_width(const subsystem5_scan_samples_t *s,
     x_hi = (float)s->fine[hi].distance_mm * subsystem5_cosd(a_hi);
     w = x_lo - x_hi;
     if (w < 0.0f) { w = 0.0f; }
-    p->approximate_width_mm = (uint16_t)(w + 0.5f);
+    p->approximate_width_mm = subsystem5_dist_field((uint32_t)(w + 0.5f));
 }
 
 typedef struct
@@ -209,9 +215,8 @@ subsystem5_profile_t subsystem5_profile_analyze(const subsystem5_scan_samples_t 
     {
         p.span_deg = last_angle - first_angle;
         /* Fallback: small-angle chord/arc, width ~= r * theta(rad). */
-        p.approximate_width_mm =
-            (uint16_t)(((uint32_t)p.closest_mm * p.span_deg * 1745U)
-                         / 100000U);
+        p.approximate_width_mm = subsystem5_dist_field(
+            ((uint32_t)p.closest_mm * p.span_deg * 1745U) / 100000U);
         /* Preferred: edge-based width from the fine sweep. */
         subsystem5_edge_width(samples, obstacle_limit_mm, &p);
     }

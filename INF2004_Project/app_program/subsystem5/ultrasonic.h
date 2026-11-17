@@ -87,26 +87,48 @@ typedef enum
     subsystem5_FAULT_BYPASS
 } subsystem5_fault_t;
 
+/* CR1: fault bitmask, bit (f - 1) for each subsystem5_fault_t f != NONE. */
+#define subsystem5_FAULT_BIT(f)  ((uint8_t)(1U << ((uint32_t)(f) - 1U)))
+
+/* IF-02 message. CR1: 32 -> 20 bytes. */
 typedef struct
 {
-    subsystem5_event_type_t type;
-    subsystem5_fault_t fault;
-    uint16_t front_mm;
     subsystem5_profile_t profile;
+    uint16_t front_mm : 12;     /* 0..4000, subsystem5_UNKNOWN_MM */
+    uint16_t type : 2;          /* subsystem5_event_type_t, 3 values */
+    uint16_t : 2;
+    uint8_t fault : 3;          /* subsystem5_fault_t of THIS event */
+    uint8_t : 5;
 } subsystem5_event_t;
 
+/* CR1: 38 -> 20 bytes. */
 typedef struct
 {
-    subsystem5_state_t state;
-    subsystem5_fault_t fault;
-    uint16_t front_mm;
-    uint8_t front_valid;
-    uint8_t stop_required;  /* Sticky until recovery/reset; 0 during BYPASS. */
-    uint8_t scan_complete;
-    uint16_t profile_count;  /* +1 per valid profile with an obstacle, even
-                                when no bypass follows (telemetry trigger) */
     subsystem5_profile_t profile;
+    uint16_t front_mm : 12;     /* 0..4000, subsystem5_UNKNOWN_MM */
+    uint16_t state : 3;         /* subsystem5_state_t, 8 values */
+    uint16_t front_valid : 1;
+    uint8_t fault_mask : 6;     /* subsystem5_FAULT_BIT() per active fault */
+    uint8_t stop_required : 1;  /* Sticky until recovery/reset; 0 during BYPASS. */
+    uint8_t scan_complete : 1;
+    uint8_t profile_count;      /* +1 per valid profile with an obstacle, even
+                                   when no bypass follows (telemetry trigger);
+                                   wraps, readers only compare for change */
 } subsystem5_status_t;
+
+/* Lowest active fault as an enum value, for the unchanged 3-bit MQTT field. */
+static inline uint8_t subsystem5_first_fault(uint8_t fault_mask)
+{
+    uint8_t f;
+    for (f = 1U; f <= (uint8_t)subsystem5_FAULT_BYPASS; f++)
+    {
+        if ((fault_mask & subsystem5_FAULT_BIT(f)) != 0U)
+        {
+            return f;
+        }
+    }
+    return (uint8_t)subsystem5_FAULT_NONE;
+}
 
 /* Queue adapter must be bounded/non-blocking (returns false if full).
  * Called from subsystem5 task, NEVER from the GPIO ISR. */

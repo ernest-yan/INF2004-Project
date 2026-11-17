@@ -104,11 +104,24 @@ static const uint8_t s_coarse_angles[subsystem5_COARSE_COUNT] =
 };
 
 /* PORT: echo variables are now touched only by the poll task (no interrupt). */
-static volatile uint8_t s_echo_phase;
 static volatile uint32_t s_echo_rise_us;
 static volatile uint32_t s_echo_pulse_us;
-static uint8_t s_echo_disturbed;    /* this ping saw a poll gap > POLL_GAP_US */
 static uint8_t s_disturbed_run;     /* disturbed pings dropped in a row */
+
+/* CR1: flags and small state machines written by the poll task ONLY, so a
+ * bit-field read-modify-write here can never race (single writer). The
+ * command flags further down are written by OTHER tasks and stay one byte
+ * each: a byte store needs no lock, a shared bit-field byte would. */
+static struct
+{
+    uint16_t echo_phase : 2;        /* subsystem5_ECHO_*, 0..3 */
+    uint16_t echo_disturbed : 1;    /* this ping saw a poll gap > POLL_GAP_US */
+    uint16_t range_active : 1;
+    uint16_t bp_phase : 3;          /* BP_TURN_OUT..BP_ALIGN, 7 values */
+    uint16_t bp_left : 1;           /* bypass on the left (was subsystem5_bp_dir() = -1) */
+    uint16_t bp_seen : 1;           /* PASS: obstacle seen beside the car */
+    uint16_t : 7;
+} s_poll;
 
 /* Poll-task-owned state; other tasks use command flags and snapshot API. */
 static subsystem5_status_t s_status;
@@ -116,7 +129,6 @@ static subsystem5_status_t s_snapshot;
 static subsystem5_scan_samples_t s_samples;
 static subsystem5_event_publish_fn s_publish;
 static void *s_publish_context;
-static uint8_t s_range_active;
 static uint8_t s_scan_index;
 static uint8_t s_scan_retries;
 static uint8_t s_reverse_count;
@@ -189,8 +201,8 @@ static void subsystem5_send_event(subsystem5_event_type_t type, subsystem5_fault
     bool accepted = false;
 
     subsystem5_memset(&event, 0, (int)sizeof(event));
-    event.type = type;
-    event.fault = fault;
+    event.type = (uint16_t)type;
+    event.fault = (uint8_t)fault;
     event.front_mm = s_status.front_mm;
     event.profile = s_status.profile;
 
@@ -203,7 +215,7 @@ static void subsystem5_send_event(subsystem5_event_type_t type, subsystem5_fault
      * VehicleController MUST ALSO check the snapshot independently. */
     if (!accepted)
     {
-        s_status.fault = subsystem5_FAULT_EVENT_DELIVERY;
+        s_status.fault_mask |= subsystem5_FAULT_BIT(subsystem5_FAULT_EVENT_DELIVERY);
         s_status.stop_required = 1U;
         s_status.state = subsystem5_STATE_FAULT;
     }
@@ -212,7 +224,7 @@ static void subsystem5_send_event(subsystem5_event_type_t type, subsystem5_fault
 static void subsystem5_fault(subsystem5_fault_t fault)
 {
     s_status.stop_required = 1U;
-    s_status.fault = fault;
+    s_status.fault_mask |= subsystem5_FAULT_BIT(fault);
     s_status.state = subsystem5_STATE_FAULT;
     subsystem5_send_event(subsystem5_EVENT_FAULT, fault);
 }
@@ -234,7 +246,7 @@ static void subsystem5_echo_measure(void)
 
         if (subsystem5_elapsed(last_poll, t) > subsystem5_POLL_GAP_US)
         {
-            s_echo_disturbed = 1U;  /* preempted: an edge may have been missed */
+            s_poll.echo_disturbed = 1U;  /* preempted: an edge may have been missed */
         }
         last_poll = t;
 
@@ -243,15 +255,15 @@ static void subsystem5_echo_measure(void)
             return; /* No complete echo: subsystem5_ping_result() reports invalid. */
         }
 
-        if ((s_echo_phase == subsystem5_ECHO_WAIT_RISE) && (level != 0U))
+        if ((s_poll.echo_phase == subsystem5_ECHO_WAIT_RISE) && (level != 0U))
         {
             s_echo_rise_us = t;
-            s_echo_phase = subsystem5_ECHO_WAIT_FALL;
+            s_poll.echo_phase = subsystem5_ECHO_WAIT_FALL;
         }
-        else if ((s_echo_phase == subsystem5_ECHO_WAIT_FALL) && (level == 0U))
+        else if ((s_poll.echo_phase == subsystem5_ECHO_WAIT_FALL) && (level == 0U))
         {
             s_echo_pulse_us = subsystem5_elapsed(s_echo_rise_us, t);
-            s_echo_phase = subsystem5_ECHO_COMPLETE;
+            s_poll.echo_phase = subsystem5_ECHO_COMPLETE;
             return;
         }
         else
@@ -264,18 +276,18 @@ static void subsystem5_echo_measure(void)
 /* Returns true only if a new measurement was initiated. */
 static bool subsystem5_ping_begin(uint32_t now_us)
 {
-    if ((s_range_active != 0U) ||
+    if ((s_poll.range_active != 0U) ||
         (subsystem5_elapsed(s_last_ping_us, now_us) < subsystem5_PING_GAP_US))
     {
         return false;
     }
 
-    s_echo_phase = subsystem5_ECHO_WAIT_RISE;
+    s_poll.echo_phase = subsystem5_ECHO_WAIT_RISE;
     s_echo_pulse_us = 0U;
     s_echo_rise_us = 0U;
-    s_echo_disturbed = 0U;
+    s_poll.echo_disturbed = 0U;
 
-    s_range_active = 1U;
+    s_poll.range_active = 1U;
     s_range_started_us = subsystem5_now_us();
     s_last_ping_us = s_range_started_us;
 
@@ -293,21 +305,21 @@ static bool subsystem5_ping_result(uint32_t now_us, subsystem5_sample_t *result)
     uint32_t pulse_us = 0U;
     uint8_t phase;
 
-    if ((s_range_active == 0U) || (result == NULL))
+    if ((s_poll.range_active == 0U) || (result == NULL))
     {
         return false;
     }
 
     /* PORT: no interrupt-masked copy needed; only this task touches these. */
-    phase = s_echo_phase;
+    phase = s_poll.echo_phase;
     if (phase == subsystem5_ECHO_COMPLETE)
     {
         pulse_us = s_echo_pulse_us;
-        s_echo_phase = 0U;
+        s_poll.echo_phase = 0U;
     }
     else if (subsystem5_elapsed(s_range_started_us, now_us) >= subsystem5_ECHO_TIMEOUT_US)
     {
-        s_echo_phase = 0U;
+        s_poll.echo_phase = 0U;
     }
     else
     {
@@ -320,12 +332,12 @@ static bool subsystem5_ping_result(uint32_t now_us, subsystem5_sample_t *result)
         return false;
     }
 
-    if ((s_echo_disturbed != 0U) && (s_disturbed_run < subsystem5_MAX_DISTURBED))
+    if ((s_poll.echo_disturbed != 0U) && (s_disturbed_run < subsystem5_MAX_DISTURBED))
     {
         /* Not a sample: drop it.  The caller sees "still pending" with no
          * range active, so it simply starts the next ping. */
         s_disturbed_run++;
-        s_range_active = 0U;
+        s_poll.range_active = 0U;
         return false;
     }
     s_disturbed_run = 0U;
@@ -352,14 +364,14 @@ static bool subsystem5_ping_result(uint32_t now_us, subsystem5_sample_t *result)
     {
         /* Echo never rose, or a pulse too short to use. */
     }
-    s_range_active = 0U;
+    s_poll.range_active = 0U;
     return true;
 }
 
 static void subsystem5_abort_pending_echo(void)
 {
-    s_echo_phase = 0U;      /* PORT: no interrupt masking needed */
-    s_range_active = 0U;
+    s_poll.echo_phase = 0U;      /* PORT: no interrupt masking needed */
+    s_poll.range_active = 0U;
 }
 
 /* TRUE when a close reading should stop the car (see the monitor state). */
@@ -374,7 +386,7 @@ static bool subsystem5_watch_active(void)
 
 static void subsystem5_reset_for_monitor(void)
 {
-    s_status.fault = subsystem5_FAULT_NONE;
+    s_status.fault_mask = 0U;
     s_status.stop_required = 0U;
     s_status.scan_complete = 0U;
     s_status.state = subsystem5_STATE_MONITOR;
@@ -552,7 +564,7 @@ static void subsystem5_scan_step(uint32_t now_us)
     const uint8_t current_angle = (s_status.state == subsystem5_STATE_COARSE) ?
         s_coarse_angles[s_scan_index] : s_fine_angles[s_scan_index];
 
-    if ((s_range_active == 0U) &&
+    if ((s_poll.range_active == 0U) &&
         ((int32_t)(now_us - s_servo_ready_us) >= 0))
     {
         (void)subsystem5_ping_begin(now_us);
@@ -626,17 +638,20 @@ static const char *const s_bp_name[] =
 };
 
 static b2_goal_t s_bypass_goal;      /* used by the reverse step */
-static uint8_t s_bp_phase;
-static int8_t s_bp_dir;              /* +1 pass on the right, -1 on the left */
 static uint32_t s_bp_base_ticks;     /* encoder count at the phase start */
 static uint32_t s_bp_turn_ticks;     /* encoder count of TURN_OUT */
 static uint32_t s_bp_clear_at;       /* TURN_OUT: count when clear, 0 = not yet */
 static uint8_t s_bp_clear_count;
-static uint8_t s_bp_seen;            /* PASS: obstacle seen beside the car */
 static uint32_t s_bp_passed_at;      /* PASS: count when passed, 0 = not yet */
 static uint32_t s_bp_out_mm;
 static uint32_t s_bp_line_at;        /* SEEK: count when the line was found */
 static uint32_t s_bp_started_us;
+
+/* +1 pass on the right, -1 on the left (CR1: stored as 1 bit). */
+static int32_t subsystem5_bp_dir(void)
+{
+    return (s_poll.bp_left != 0U) ? -1 : 1;
+}
 
 /* Mean of the two wheels' encoder edges (single-channel: always counts up). */
 static uint32_t subsystem5_ticks_now(void)
@@ -669,10 +684,10 @@ static void subsystem5_drive(int32_t left_mm_s, int32_t right_mm_s)
 
 static void subsystem5_bp_enter(uint8_t phase)
 {
-    const int32_t t = (int32_t)subsystem5_BYPASS_TURN_MM_S * s_bp_dir;
+    const int32_t t = (int32_t)subsystem5_BYPASS_TURN_MM_S * subsystem5_bp_dir();
     const int32_t v = (int32_t)subsystem5_BYPASS_SPEED_MM_S;
 
-    s_bp_phase = phase;
+    s_poll.bp_phase = phase;
     s_bp_base_ticks = subsystem5_ticks_now();
     s_bp_clear_count = 0U;
     s_bp_line_at = 0U;
@@ -692,8 +707,8 @@ static void subsystem5_bp_enter(uint8_t phase)
         subsystem5_drive(-t, t);
         break;
     case BP_PASS:                        /* look at the obstacle, 60 deg off */
-        subsystem5_servo_set((s_bp_dir > 0) ? 150U : 30U);
-        s_bp_seen = 0U;
+        subsystem5_servo_set((subsystem5_bp_dir() > 0) ? 150U : 30U);
+        s_poll.bp_seen = 0U;
         s_bp_passed_at = 0U;
         subsystem5_drive(v, v);
         break;
@@ -710,7 +725,7 @@ static void subsystem5_bypass_fail(void)
     subsystem5_abort_pending_echo();
     subsystem5_fault(subsystem5_FAULT_BYPASS);
     tm_printf((UB*)"[S5] bypass failed during \"%s\", stopped\n",
-              s_bp_name[s_bp_phase]);
+              s_bp_name[s_poll.bp_phase]);
 }
 
 /* How far sideways the car must move: the passing-side edge's offset from
@@ -725,7 +740,7 @@ static uint32_t subsystem5_out_distance_mm(void)
 
     if ((p->right_edge_mm != 0U) && (p->left_edge_mm != 0U))
     {
-        edge_mm = (s_bp_dir > 0) ?
+        edge_mm = (subsystem5_bp_dir() > 0) ?
             ((float)p->right_edge_mm * subsystem5_cosd(
                 (float)p->right_edge_deg + (float)subsystem5_BEAM_EDGE_DEG)) :
             -((float)p->left_edge_mm * subsystem5_cosd(
@@ -757,15 +772,15 @@ static uint32_t subsystem5_out_distance_mm(void)
 
 static void subsystem5_bypass_begin(void)
 {
-    s_bp_dir = (s_status.profile.candidate_side == subsystem5_SIDE_LEFT) ?
-               (int8_t)-1 : (int8_t)1;
+    s_poll.bp_left = (s_status.profile.candidate_side == subsystem5_SIDE_LEFT) ?
+                     1U : 0U;
     s_bp_turn_ticks = 0U;
     s_bp_clear_at = 0U;
     s_bp_out_mm = 0U;
     s_bp_started_us = subsystem5_now_us();
     s_status.state = subsystem5_STATE_BYPASS;
     s_status.stop_required = 0U;  /* This motion is authorized: VC must not stop it. */
-    tm_printf((UB*)"[S5] bypassing on the %s\n", (s_bp_dir > 0) ? "right" : "left");
+    tm_printf((UB*)"[S5] bypassing on the %s\n", (subsystem5_bp_dir() > 0) ? "right" : "left");
     subsystem5_bp_enter(BP_TURN_OUT);
 }
 
@@ -792,7 +807,7 @@ static void subsystem5_bypass_step(uint32_t now_us)
         return;
     }
 
-    if ((s_range_active == 0U) &&
+    if ((s_poll.range_active == 0U) &&
         ((int32_t)(now_us - s_servo_ready_us) >= 0))
     {
         (void)subsystem5_ping_begin(now_us);
@@ -810,13 +825,13 @@ static void subsystem5_bypass_step(uint32_t now_us)
 
     /* Driving straight while looking ahead: never into something. */
     if (have && (s_servo_angle == 90U) && (r.distance_mm <= subsystem5_URGENT_MM) &&
-        ((s_bp_phase == BP_OUT) || (s_bp_phase == BP_SEEK)))
+        ((s_poll.bp_phase == BP_OUT) || (s_poll.bp_phase == BP_SEEK)))
     {
         subsystem5_bypass_fail();
         return;
     }
 
-    switch (s_bp_phase)
+    switch (s_poll.bp_phase)
     {
     case BP_TURN_OUT:
     {
@@ -867,17 +882,17 @@ static void subsystem5_bypass_step(uint32_t now_us)
         {
             if (r.distance_mm <= subsystem5_OBSTACLE_ZONE_MM)
             {
-                s_bp_seen = 1U;
+                s_poll.bp_seen = 1U;
                 s_bp_clear_count = 0U;
             }
-            else if (s_bp_seen != 0U)
+            else if (s_poll.bp_seen != 0U)
             {
                 s_bp_clear_count++;
             }
         }
         if ((s_bp_passed_at == 0U) &&
-            (((s_bp_seen != 0U) && (s_bp_clear_count >= 2U)) ||
-             ((s_bp_seen == 0U) &&
+            (((s_poll.bp_seen != 0U) && (s_bp_clear_count >= 2U)) ||
+             ((s_poll.bp_seen == 0U) &&
               (done >= subsystem5_mm_to_ticks(subsystem5_BYPASS_PASS_BLIND_MM)))))
         {
             s_bp_passed_at = (done > 0U) ? done : 1U;
@@ -1026,7 +1041,7 @@ void subsystem5_poll(void)
             return;
         }
 
-        if ((s_range_active == 0U) &&
+        if ((s_poll.range_active == 0U) &&
             ((int32_t)(now_us - s_servo_ready_us) >= 0))
         {
             (void)subsystem5_ping_begin(now_us);
@@ -1159,7 +1174,7 @@ int subsystem5_ultrasonic_init(subsystem5_event_publish_fn publish, void *contex
     s_status.state = subsystem5_STATE_MONITOR;
     s_publish = publish;
     s_publish_context = context;
-    s_range_active = 0U;
+    s_poll.range_active = 0U;
     s_monitor_invalid = 0U;
     s_close_count = 0U;
     s_scan_retries = 0U;
@@ -1178,7 +1193,7 @@ int subsystem5_ultrasonic_init(subsystem5_event_publish_fn publish, void *contex
     (void)gpio_set_val(subsystem5_TRIG_GPIO, 0U);
     (void)gpio_set_pin(subsystem5_ECHO_GPIO, GPIO_MODE_IN);
 
-    s_echo_phase = 0U;
+    s_poll.echo_phase = 0U;
     s_echo_rise_us = 0U;
     s_echo_pulse_us = 0U;
 
