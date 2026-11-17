@@ -41,44 +41,76 @@ typedef struct
     uint16_t kp_q8;                 /* PI: proportional gain * 256. */
     uint16_t ki_q8;                 /* Integral per 10ms * 256. */
 } b2_config_t;
+/* CR1 minimum-bit representation (testing/cr1/DATA_REPRESENTATION.md).
+ * Barr C forbids signed bit-fields, so signed values are stored
+ * offset-binary: field = value + B2_SPEED_OFFSET (10 bits: -512..511 mm/s). */
+#define B2_SPEED_OFFSET       (512)
+#define B2_SPEED_FIELD_MAX    (1023)
+#define B2_SPEED_LIMIT_MM_S   (511U)    /* largest speed a field can hold */
+#define B2_DISTANCE_MAX_MM    (8191U)   /* 13-bit MOVE distance */
+#define B2_TURN_MAX_DEG       (360U)    /*  9-bit TURN angle */
+#define B2_TIMEOUT_UNIT_MS    (10U)     /* goal timeout stored in 10 ms units */
+#define B2_TIMEOUT_MAX_MS     (10230U)  /* 10 bits x 10 ms */
+#define B2_PWM_MAX_PERMIL     (1000U)   /* 10-bit PWM duty */
+/* Fault bitmask: bit (f - 1) for each b2_fault_t f other than NONE. */
+#define B2_FAULT_BIT(f)       ((uint8_t)(1U << ((uint32_t)(f) - 1U)))
+
+/* A request, filled in on the CALLER's stack. Plain types on purpose:
+ * b2_submit_command() range-checks every field and refuses bad requests
+ * BEFORE packing, so an out-of-range value is never silently truncated by
+ * a bit-field. Only the packed copy is shared between tasks. */
 typedef struct
 {
     b2_cmd_type_t type;
     int16_t left_mm_s;              /* B2_CMD_SPEED only; negative = reverse. */
     int16_t right_mm_s;
-    uint16_t distance_mm;           /* MOVE goals. */
-    uint16_t turn_degrees;          /* TURN goals. */
+    uint16_t distance_mm;           /* MOVE goals, 1..B2_DISTANCE_MAX_MM. */
+    uint16_t turn_degrees;          /* TURN goals, 1..B2_TURN_MAX_DEG. */
     uint16_t goal_speed_mm_s;       /* MOVE / TURN goals. */
-    uint32_t timeout_ms;            /* MOVE / TURN goals, must be nonzero. */
+    uint16_t timeout_ms;            /* MOVE / TURN goals, 1..B2_TIMEOUT_MAX_MS. */
 } b2_command_t;
+
+/* Shared snapshot (b2_get_status). Read the speeds with b2_speed_value(). */
 typedef struct
 {
-    b2_state_t state;
-    b2_fault_t fault;
-    uint8_t brake_latched;
-    uint32_t left_encoder_edges;
+    uint32_t left_encoder_edges;    /* ISR counter copy: full word, wraps. */
     uint32_t right_encoder_edges;
-    int32_t left_total_mm;          /* Signed estimate from commanded direction. */
-    int32_t right_total_mm;
-    int32_t left_speed_mm_s;
-    int32_t right_speed_mm_s;
-    uint16_t left_pwm_permil;
-    uint16_t right_pwm_permil;
-    uint32_t deadline_misses;
-    uint32_t goals_done;            /* Counts MOVE / TURN goals that finished. */
-    uint64_t last_update_us;
+    uint32_t last_update_us;        /* 32-bit us, wraps every 71.6 min. */
+    int16_t left_total_mm;          /* Signed estimate from commanded direction, */
+    int16_t right_total_mm;         /* saturates at +-32767 mm. */
+    uint32_t left_speed_ob : 10;    /* speed + B2_SPEED_OFFSET */
+    uint32_t right_speed_ob : 10;
+    uint32_t left_pwm_permil : 10;  /* 0..1000 */
+    uint32_t brake_latched : 1;
+    uint32_t : 1;
+    uint16_t right_pwm_permil : 10;
+    uint16_t state : 3;             /* b2_state_t, 5 values */
+    uint16_t : 3;
+    uint16_t deadline_misses;       /* saturates */
+    uint8_t fault_mask : 4;         /* B2_FAULT_BIT() per active fault */
+    uint8_t : 4;
+    uint8_t goals_done;             /* MOVE / TURN goals finished, wraps. */
 } b2_status_t;
+
 typedef struct
 {
-    b2_event_type_t type;
-    b2_fault_t fault;
+    uint8_t type : 2;               /* b2_event_type_t, 4 values */
+    uint8_t fault : 3;              /* b2_fault_t, 5 values */
+    uint8_t : 3;
 } b2_event_t;
+
 typedef struct
 {
-    uint32_t goals_done_at_start;
-    uint64_t started_us;
-    bool seen_running;
+    uint32_t started_us;
+    uint8_t goals_done_at_start;
+    uint8_t seen_running : 1;
+    uint8_t : 7;
 } b2_goal_t;
+
+static inline int32_t b2_speed_value(uint32_t field)
+{
+    return (int32_t)field - B2_SPEED_OFFSET;
+}
 typedef enum
 {
     B2_GOAL_RUNNING = 0, B2_GOAL_DONE, B2_GOAL_FAILED

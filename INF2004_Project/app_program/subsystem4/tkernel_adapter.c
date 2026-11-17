@@ -85,7 +85,8 @@ static void subsystem4_feed_odometry(void)
     {
         b4_update_travel_mm((uint32_t)mean_mm);
     }
-    b4_update_wheel_speeds(st.left_speed_mm_s, st.right_speed_mm_s);
+    b4_update_wheel_speeds(b2_speed_value(st.left_speed_ob),
+                           b2_speed_value(st.right_speed_ob));
 }
 
 /* Tuning aid: every 2 s, if a new highest upward speed or tilt was seen

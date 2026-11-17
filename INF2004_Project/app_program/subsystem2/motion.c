@@ -32,35 +32,66 @@ static app_lock_t s_lock;
 #define B2_MIN_OUTPUT        (0U)
 #define B2_INTEGRAL_LIMIT     (8000)   /* PI integral clamp (anti-windup) */
 #define B2_INTEGRAL_RESET_MM_S (20)    /* request change that resets it */
-#define B2_GOAL_START_US     (100000ULL)
+#define B2_GOAL_START_US     (100000U)
 
-static b2_config_t s_cfg;
+/* CR1: a validated command packed into two words (8 bytes, was 16).
+ * Speeds offset-binary (Barr C: no signed bit-fields). */
+typedef struct
+{
+    uint32_t type : 3;              /* b2_cmd_type_t */
+    uint32_t left_ob : 10;          /* left_mm_s + B2_SPEED_OFFSET */
+    uint32_t right_ob : 10;
+    uint32_t goal_speed : 9;        /* 0..511 mm/s */
+    uint32_t distance_mm : 13;      /* 0..8191 */
+    uint32_t turn_deg : 9;          /* 0..360 */
+    uint32_t timeout_10ms : 10;     /* 0..1023 x 10 ms */
+} b2_cmd_packed_t;
+
+/* CR1: flags grouped by WHO WRITES them. A bit-field write is a
+ * read-modify-write of the whole byte, so two writers on different tasks
+ * or cores could undo each other's change. s_shared is written by other
+ * tasks too: every write holds s_lock. s_own is written by the motion
+ * task only. Reads of a single bit are safe without the lock. */
+static struct
+{
+    uint8_t ready : 1;
+    uint8_t pending : 1;            /* s_mailbox holds a new command */
+    uint8_t stop_event_pending : 1;
+    uint8_t brake_event_pending : 1;
+    uint8_t : 4;
+} s_shared;
+static struct
+{
+    uint8_t poll_started : 1;       /* replaces s_last_poll_us == 0 */
+    uint8_t was_moving : 1;
+    uint8_t event_pending : 1;
+    uint8_t : 5;
+} s_own;
+
+static const b2_config_t *s_cfg;    /* CR1: points at the caller's const config */
 static b2_status_t s_status;
 static b2_event_publish_fn s_publish;
 static void *s_publish_ctx;
+/* Written by the encoder ISR: full aligned words (single-instruction store
+ * on Cortex-M0+), never packed. Read by the task only inside s_lock. */
 static volatile uint32_t s_irq_count[2];
-static volatile uint64_t s_last_edge_us[2];
-static bool s_ready;
-static bool s_pending;
-static b2_command_t s_mailbox;
-static b2_command_t s_active;
+static volatile uint32_t s_last_edge_us[2]; /* CR1: was uint64_t, which the
+                                               ISR stored in two halves */
+static b2_cmd_packed_t s_mailbox;
+static b2_cmd_packed_t s_active;
 static uint32_t s_goal_ticks;
 static uint32_t s_start_ticks[2];
 static uint32_t s_prev_ticks[2];
-static int32_t s_requested[2];
-static int32_t s_integral[2];
-static uint64_t s_goal_started_us;
-static uint64_t s_wheel_started_us[2];  /* last time this wheel went 0 -> moving */
-static uint64_t s_last_poll_us;
-static uint64_t s_last_stopped_check_us;
-static uint32_t s_pwm_wrap;
-static volatile uint32_t s_command_generation;
-static int64_t s_signed_encoder_ticks[2];
-static bool s_was_moving;
-static bool s_stop_event_pending;
-static bool s_brake_event_pending;
+static int16_t s_requested[2];      /* -511..511 mm/s */
+static int16_t s_integral[2];       /* clamped to +-B2_INTEGRAL_LIMIT */
+static uint32_t s_goal_started_us;
+static uint32_t s_wheel_started_us[2];  /* last time this wheel went 0 -> moving */
+static uint32_t s_last_poll_us;
+static uint32_t s_last_stopped_check_us;
+static uint16_t s_pwm_wrap;
+static volatile uint8_t s_command_generation; /* equality only; under s_lock */
+static int32_t s_signed_encoder_ticks[2];
 static b2_event_t s_pending_event;
-static bool s_event_pending;
 
 /* PORT: kernel interrupt handler for IO_IRQ_BANK0 (replaces the SDK's GPIO
  * callback).  It is the team's SINGLE GPIO-bank handler: if another subsystem
@@ -93,6 +124,42 @@ static int32_t b2_clamp(int32_t n, int32_t minimum, int32_t maximum)
     if (n > maximum) { return maximum; }
     return n;
 }
+/* Signed speed -> 10-bit offset-binary field, saturating. */
+static uint32_t b2_speed_field(int32_t mm_s)
+{
+    return (uint32_t)b2_clamp(mm_s + B2_SPEED_OFFSET, 0, B2_SPEED_FIELD_MAX);
+}
+/* Wrap-safe "a is later than b" for 32-bit microsecond times. */
+static bool b2_time_after(uint32_t a, uint32_t b)
+{
+    return (int32_t)(a - b) > 0;
+}
+/* Call with s_lock held. */
+static int32_t b2_wheel_speed_locked(uint32_t i)
+{
+    return b2_speed_value((i == 0U) ? s_status.left_speed_ob :
+                                      s_status.right_speed_ob);
+}
+static void b2_set_wheel_speed_locked(uint32_t i, int32_t mm_s)
+{
+    if (i == 0U) { s_status.left_speed_ob = b2_speed_field(mm_s); }
+    else         { s_status.right_speed_ob = b2_speed_field(mm_s); }
+}
+/* The caller has already range-checked cmd (b2_submit_command). */
+static b2_cmd_packed_t b2_pack_command(const b2_command_t *cmd)
+{
+    b2_cmd_packed_t p;
+    p.type = (uint32_t)cmd->type;
+    p.left_ob = b2_speed_field(cmd->left_mm_s);
+    p.right_ob = b2_speed_field(cmd->right_mm_s);
+    p.goal_speed = cmd->goal_speed_mm_s;
+    p.distance_mm = cmd->distance_mm;
+    p.turn_deg = cmd->turn_degrees;
+    /* Round up, so a goal never times out earlier than asked. */
+    p.timeout_10ms = ((uint32_t)cmd->timeout_ms + (B2_TIMEOUT_UNIT_MS - 1U)) /
+                     B2_TIMEOUT_UNIT_MS;
+    return p;
+}
 /* Always call with interrupts disabled; both channels LOW means BRAKE. */
 static void b2_write_wheels_locked(int32_t a, int32_t b)
 {
@@ -110,8 +177,10 @@ static void b2_write_wheels_locked(int32_t a, int32_t b)
         (void)pwm_set_cc(pins[i][0], (outputs[i] > 0) ? level : 0U);
         (void)pwm_set_cc(pins[i][1], (outputs[i] < 0) ? level : 0U);
     }
-    s_status.left_pwm_permil = (uint16_t)b2_abs32(a);
-    s_status.right_pwm_permil = (uint16_t)b2_abs32(b);
+    s_status.left_pwm_permil = (uint32_t)b2_clamp(b2_abs32(a), 0,
+                                                  (int32_t)B2_MAX_DUTY);
+    s_status.right_pwm_permil = (uint16_t)b2_clamp(b2_abs32(b), 0,
+                                                   (int32_t)B2_MAX_DUTY);
 }
 static void b2_zero_outputs_locked(void)
 {
@@ -121,30 +190,31 @@ static void b2_zero_outputs_locked(void)
     s_integral[0] = 0;
     s_integral[1] = 0;
 }
+/* Motion task only. */
 static void b2_queue_event(b2_event_type_t type, b2_fault_t fault)
 {
-    s_pending_event.type = type;
-    s_pending_event.fault = fault;
-    s_event_pending = true;
+    s_pending_event.type = (uint8_t)type;
+    s_pending_event.fault = (uint8_t)fault;
+    s_own.event_pending = 1U;
 }
 static void b2_fault_now(b2_fault_t fault)
 {
     const UINT irq = app_lock(&s_lock);
     b2_zero_outputs_locked();
     s_status.state = B2_FAULT;
-    s_status.fault = fault;
+    s_status.fault_mask |= B2_FAULT_BIT(fault);
     s_status.brake_latched = 1U;
-    s_pending = false;
+    s_shared.pending = 0U;
     ++s_command_generation;
     app_unlock(&s_lock, irq);
     b2_queue_event(B2_EVENT_FAULT, fault);
 }
 static void b2_deliver_event(void)
 {
-    if (s_event_pending)
+    if (s_own.event_pending != 0U)
     {
         const b2_event_t event = s_pending_event;
-        s_event_pending = false;
+        s_own.event_pending = 0U;
         if ((s_publish != NULL) && !s_publish(&event, s_publish_ctx))
         {
             /* An event queue must never silently lose critical status. */
@@ -163,6 +233,8 @@ bool b2_init(const b2_config_t *config, b2_event_publish_fn publish, void *ctx)
         (config->wheel_circumference_mm == 0U) ||
         (config->wheel_track_mm == 0U) ||
         (config->max_speed_mm_s == 0U) ||
+        (config->max_speed_mm_s > B2_SPEED_LIMIT_MM_S) ||   /* CR1 field */
+        (config->encoder_stall_ms > 60000U) ||  /* x1000 must fit 32 bits */
         (config->max_pwm_permil == 0U) ||
         (config->max_pwm_permil > B2_MAX_DUTY) ||
         (config->encoder_stall_ms == 0U) ||
@@ -175,29 +247,39 @@ bool b2_init(const b2_config_t *config, b2_event_publish_fn publish, void *ctx)
         s_status = zero_status;
     }
     APP_LOCK_INIT(s_lock);
-    s_cfg = *config;
+    s_cfg = config;
     s_publish = publish;
     s_publish_ctx = ctx;
     s_status.state = B2_READY;
+    s_status.left_speed_ob = b2_speed_field(0);
+    s_status.right_speed_ob = b2_speed_field(0);
     s_command_generation = 0U;
-    s_signed_encoder_ticks[0] = 0LL;
-    s_signed_encoder_ticks[1] = 0LL;
+    s_signed_encoder_ticks[0] = 0;
+    s_signed_encoder_ticks[1] = 0;
     s_irq_count[0] = 0U;
     s_irq_count[1] = 0U;
-    s_last_edge_us[0] = 0ULL;
-    s_last_edge_us[1] = 0ULL;
-    s_ready = false;
-    s_pending = false;
-    s_event_pending = false;
-    s_brake_event_pending = false;
-    s_was_moving = false;
-    s_stop_event_pending = false;
-    s_last_poll_us = 0ULL;
-    s_last_stopped_check_us = 0ULL;
-    s_pwm_wrap = (APP_CLK_SYS_HZ / config->pwm_frequency_hz) - 1U;  /* PORT */
-    if ((s_pwm_wrap < 100U) || (s_pwm_wrap > 65535U))
+    s_last_edge_us[0] = 0U;
+    s_last_edge_us[1] = 0U;
+    {   /* the motion task has not started: no other writer yet */
+        const UINT irq = app_lock(&s_lock);
+        s_shared.ready = 0U;
+        s_shared.pending = 0U;
+        s_shared.stop_event_pending = 0U;
+        s_shared.brake_event_pending = 0U;
+        app_unlock(&s_lock, irq);
+    }
+    s_own.poll_started = 0U;
+    s_own.was_moving = 0U;
+    s_own.event_pending = 0U;
+    s_last_poll_us = 0U;
+    s_last_stopped_check_us = 0U;
     {
-        return false;
+        const uint32_t wrap = (APP_CLK_SYS_HZ / config->pwm_frequency_hz) - 1U;
+        if ((wrap < 100U) || (wrap > 65535U))   /* PORT */
+        {
+            return false;
+        }
+        s_pwm_wrap = (uint16_t)wrap;
     }
     /* PORT: PWM block is shared with S5's servo: release reset, never reset. */
     app_release_reset(RESETS_RESET_PWM);
@@ -237,7 +319,11 @@ bool b2_init(const b2_config_t *config, b2_event_publish_fn publish, void *ctx)
         ClearInt(B2_IO_IRQ_BANK0);
         EnableInt(B2_IO_IRQ_BANK0, S2_ENC_INTPRI);
     }
-    s_ready = true;
+    {
+        const UINT irq = app_lock(&s_lock);
+        s_shared.ready = 1U;
+        app_unlock(&s_lock, irq);
+    }
     return true;
 }
 void b2_encoder_gpio_irq(unsigned int gpio, uint32_t events)
@@ -248,41 +334,47 @@ void b2_encoder_gpio_irq(unsigned int gpio, uint32_t events)
         if ((gpio == B2_ENCODER_LEFT_GP) || (gpio == B2_ENCODER_RIGHT_GP))
         {
             ++s_irq_count[i];
-            s_last_edge_us[i] = app_time_us_64();
+            s_last_edge_us[i] = app_time_us_32();
         }
     }
 }
 bool b2_submit_command(const b2_command_t *cmd)
 {
-    if ((!s_ready) || (cmd == NULL)) { return false; }
+    if ((s_shared.ready == 0U) || (cmd == NULL)) { return false; }
     if (cmd->type > B2_CMD_TURN_RIGHT) { return false; }
+    /* CR1: every field is range-checked here, before packing, so a request
+     * that does not fit its bit-field is refused, never truncated. */
     if (cmd->type == B2_CMD_SPEED)
     {
-        if ((b2_abs32(cmd->left_mm_s) > s_cfg.max_speed_mm_s) ||
-            (b2_abs32(cmd->right_mm_s) > s_cfg.max_speed_mm_s))
+        if ((b2_abs32(cmd->left_mm_s) > s_cfg->max_speed_mm_s) ||
+            (b2_abs32(cmd->right_mm_s) > s_cfg->max_speed_mm_s))
         { return false; }
     }
     else if ((cmd->goal_speed_mm_s == 0U) ||
-             (cmd->goal_speed_mm_s > s_cfg.max_speed_mm_s) ||
+             (cmd->goal_speed_mm_s > s_cfg->max_speed_mm_s) ||
              (cmd->timeout_ms == 0U) ||
+             (cmd->timeout_ms > B2_TIMEOUT_MAX_MS) ||
              (((cmd->type == B2_CMD_MOVE_FORWARD) ||
                (cmd->type == B2_CMD_MOVE_BACKWARD)) &&
-               (cmd->distance_mm == 0U)) ||
+              ((cmd->distance_mm == 0U) ||
+               (cmd->distance_mm > B2_DISTANCE_MAX_MM))) ||
              (((cmd->type == B2_CMD_TURN_LEFT) ||
                (cmd->type == B2_CMD_TURN_RIGHT)) &&
-               (cmd->turn_degrees == 0U)))
+              ((cmd->turn_degrees == 0U) ||
+               (cmd->turn_degrees > B2_TURN_MAX_DEG))))
     { return false; }
+    const b2_cmd_packed_t packed = b2_pack_command(cmd);
     const UINT irq = app_lock(&s_lock);
     const bool allowed = (s_status.brake_latched == 0U) &&
         (s_status.state != B2_FAULT) &&
         ((s_status.state == B2_READY) ||
          ((s_status.state == B2_TRACK_SPEED) && (cmd->type == B2_CMD_SPEED))) &&
-        (!s_pending || (cmd->type == B2_CMD_SPEED &&
-                        s_mailbox.type == B2_CMD_SPEED));
+        ((s_shared.pending == 0U) || ((cmd->type == B2_CMD_SPEED) &&
+                                      (s_mailbox.type == B2_CMD_SPEED)));
     if (allowed)
     {
-        s_mailbox = *cmd;
-        s_pending = true;
+        s_mailbox = packed;
+        s_shared.pending = 1U;
     }
     app_unlock(&s_lock, irq);
     return allowed;
@@ -290,39 +382,39 @@ bool b2_submit_command(const b2_command_t *cmd)
 void b2_stop(void)
 {
     const UINT irq = app_lock(&s_lock);
-    if (s_ready && !s_status.brake_latched)
+    if ((s_shared.ready != 0U) && (s_status.brake_latched == 0U))
     {
         b2_zero_outputs_locked();
         s_status.state = B2_READY;
-        s_pending = false;
+        s_shared.pending = 0U;
         ++s_command_generation;
-        s_stop_event_pending = true;
-        s_last_stopped_check_us = app_time_us_64();
+        s_shared.stop_event_pending = 1U;
+        s_last_stopped_check_us = app_time_us_32();
     }
     app_unlock(&s_lock, irq);
 }
 void b2_emergency_brake(void)
 {
-    if (!s_ready) { return; }
+    if (s_shared.ready == 0U) { return; }
     const UINT irq = app_lock(&s_lock);
     b2_zero_outputs_locked();
     s_status.brake_latched = 1U;
     s_status.state = B2_BRAKED;
-    s_pending = false;
+    s_shared.pending = 0U;
     ++s_command_generation;
-    s_brake_event_pending = true;
+    s_shared.brake_event_pending = 1U;
     app_unlock(&s_lock, irq);
 }
 bool b2_authorized_reset_while_stopped(void)
 {
-    if (!s_ready) { return false; }
+    if (s_shared.ready == 0U) { return false; }
     const UINT irq = app_lock(&s_lock);
     /* Encoder silence supports but cannot prove physical standstill. */
-    const uint64_t now = app_time_us_64();
-    if (((s_last_edge_us[0] != 0ULL) &&
-         ((now - s_last_edge_us[0]) < 200000ULL)) ||
-        ((s_last_edge_us[1] != 0ULL) &&
-         ((now - s_last_edge_us[1]) < 200000ULL)))
+    const uint32_t now = app_time_us_32();
+    if (((s_last_edge_us[0] != 0U) &&
+         ((now - s_last_edge_us[0]) < 200000U)) ||
+        ((s_last_edge_us[1] != 0U) &&
+         ((now - s_last_edge_us[1]) < 200000U)))
     {
         app_unlock(&s_lock, irq);
         return false;
@@ -330,12 +422,12 @@ bool b2_authorized_reset_while_stopped(void)
     /* Must not release the latch merely due to a new START command. */
     b2_zero_outputs_locked();
     s_status.brake_latched = 0U;
-    s_status.fault = B2_FAULT_NONE;
+    s_status.fault_mask = 0U;
     s_status.state = B2_READY;
-    s_pending = false;
+    s_shared.pending = 0U;
     ++s_command_generation;
-    s_stop_event_pending = false;
-    s_brake_event_pending = false;
+    s_shared.stop_event_pending = 0U;
+    s_shared.brake_event_pending = 0U;
     app_unlock(&s_lock, irq);
     return true;
 }
@@ -353,8 +445,8 @@ bool b2_goal_start(b2_goal_t *goal, const b2_command_t *cmd)
     b2_status_t st;
     b2_get_status(&st);
     goal->goals_done_at_start = st.goals_done;
-    goal->started_us = app_time_us_64();
-    goal->seen_running = false;
+    goal->started_us = app_time_us_32();
+    goal->seen_running = 0U;
     return b2_submit_command(cmd);
 }
 b2_goal_result_t b2_goal_check(b2_goal_t *goal)
@@ -367,23 +459,26 @@ b2_goal_result_t b2_goal_check(b2_goal_t *goal)
     }
     if (st.state == B2_EXECUTE_GOAL)
     {
-        goal->seen_running = true;
+        goal->seen_running = 1U;
         return B2_GOAL_RUNNING;
     }
     /* Still READY shortly after the start: waiting for the next b2_poll(). */
-    if ((st.state == B2_READY) && !goal->seen_running &&
-        ((app_time_us_64() - goal->started_us) < B2_GOAL_START_US))
+    if ((st.state == B2_READY) && (goal->seen_running == 0U) &&
+        ((app_time_us_32() - goal->started_us) < B2_GOAL_START_US))
     {
         return B2_GOAL_RUNNING;
     }
     return B2_GOAL_FAILED;
 }
-static void b2_start_command(const b2_command_t *cmd, uint32_t tick_l,
-                             uint32_t tick_r, uint64_t now)
+/* Call with s_lock held. cmd has been range-checked and packed. */
+static void b2_start_command(const b2_cmd_packed_t *cmd, uint32_t tick_l,
+                             uint32_t tick_r, uint32_t now)
 {
     const bool continuous_speed = (cmd->type == B2_CMD_SPEED) &&
                                   (s_status.state == B2_TRACK_SPEED);
     const int32_t previous[2] = {s_requested[0], s_requested[1]};
+    const int32_t goal_speed = (int32_t)cmd->goal_speed;
+    int32_t request[2];
     s_active = *cmd;
     if (!continuous_speed)
     {
@@ -396,41 +491,43 @@ static void b2_start_command(const b2_command_t *cmd, uint32_t tick_l,
     s_goal_ticks = 0U;
     if (cmd->type == B2_CMD_SPEED)
     {
-        s_requested[0] = cmd->left_mm_s;
-        s_requested[1] = cmd->right_mm_s;
+        request[0] = b2_speed_value(cmd->left_ob);
+        request[1] = b2_speed_value(cmd->right_ob);
         s_status.state = B2_TRACK_SPEED;
     }
     else
     {
         if (cmd->type == B2_CMD_MOVE_FORWARD)
         {
-            s_requested[0] = cmd->goal_speed_mm_s;
-            s_requested[1] = cmd->goal_speed_mm_s;
+            request[0] = goal_speed;
+            request[1] = goal_speed;
         }
         else if (cmd->type == B2_CMD_MOVE_BACKWARD)
         {
-            s_requested[0] = -(int32_t)cmd->goal_speed_mm_s;
-            s_requested[1] = -(int32_t)cmd->goal_speed_mm_s;
+            request[0] = -goal_speed;
+            request[1] = -goal_speed;
         }
         else if (cmd->type == B2_CMD_TURN_LEFT)
         {
-            s_requested[0] = -(int32_t)cmd->goal_speed_mm_s;
-            s_requested[1] = cmd->goal_speed_mm_s;
+            request[0] = -goal_speed;
+            request[1] = goal_speed;
         }
         else
         {
-            s_requested[0] = cmd->goal_speed_mm_s;
-            s_requested[1] = -(int32_t)cmd->goal_speed_mm_s;
+            request[0] = goal_speed;
+            request[1] = -goal_speed;
         }
         s_goal_ticks = (cmd->type <= B2_CMD_MOVE_BACKWARD) ?
-            b2_mm_to_ticks(cmd->distance_mm, s_cfg.ticks_per_wheel_rev,
-                           s_cfg.wheel_circumference_mm) :
-            b2_turn_to_ticks(cmd->turn_degrees, s_cfg.wheel_track_mm,
-                             s_cfg.ticks_per_wheel_rev,
-                             s_cfg.wheel_circumference_mm);
+            b2_mm_to_ticks(cmd->distance_mm, s_cfg->ticks_per_wheel_rev,
+                           s_cfg->wheel_circumference_mm) :
+            b2_turn_to_ticks(cmd->turn_deg, s_cfg->wheel_track_mm,
+                             s_cfg->ticks_per_wheel_rev,
+                             s_cfg->wheel_circumference_mm);
         if (s_goal_ticks < B2_MIN_TICKS) { s_goal_ticks = B2_MIN_TICKS; }
         s_status.state = B2_EXECUTE_GOAL;
     }
+    s_requested[0] = (int16_t)request[0];   /* |request| <= 511 */
+    s_requested[1] = (int16_t)request[1];
     /* A wheel held at 0 (steering) has old encoder edges: give it the full
      * stall window again when it restarts, or it reads as stalled at once. */
     for (uint32_t i = 0U; i < 2U; ++i)
@@ -445,45 +542,51 @@ static void b2_start_command(const b2_command_t *cmd, uint32_t tick_l,
          * request to 100-127 mm/s (2026-11-17 telemetry) and widened every
          * zig-zag. A steady request (straight line, hump) keeps it. */
         if (((previous[i] < 0) != (s_requested[i] < 0)) ||
-            (b2_abs32(s_requested[i] - previous[i]) >= B2_INTEGRAL_RESET_MM_S))
+            (b2_abs32((int32_t)s_requested[i] - previous[i]) >=
+             B2_INTEGRAL_RESET_MM_S))
         {
             s_integral[i] = 0;
         }
     }
-    s_was_moving = true;
+    s_own.was_moving = 1U;
 }
 void b2_poll(void)
 {
-    if (!s_ready) { return; }
-    const uint64_t now = app_time_us_64();
+    if (s_shared.ready == 0U) { return; }
+    const uint32_t now = app_time_us_32();
     uint32_t ticks[2];
-    uint64_t edges_at_us[2];
-    uint32_t generation_at_mailbox;
-    b2_command_t cmd;
+    uint32_t edges_at_us[2];
+    uint8_t generation_at_mailbox;
+    b2_cmd_packed_t cmd;
     bool has_cmd;
+    bool brake_event;
     UINT irq = app_lock(&s_lock);
     ticks[0] = s_irq_count[0];
     ticks[1] = s_irq_count[1];
     edges_at_us[0] = s_last_edge_us[0];
     edges_at_us[1] = s_last_edge_us[1];
     generation_at_mailbox = s_command_generation;
-    has_cmd = s_pending;
+    has_cmd = (s_shared.pending != 0U);
     cmd = s_mailbox;
-    s_pending = false;
+    s_shared.pending = 0U;
     app_unlock(&s_lock, irq);
-    if (s_last_poll_us == 0ULL)
+    if (s_own.poll_started == 0U)
     {
+        s_own.poll_started = 1U;
         s_last_poll_us = now;
         s_prev_ticks[0] = ticks[0];
         s_prev_ticks[1] = ticks[1];
         return;
     }
-    const uint32_t elapsed_ms = (uint32_t)((now - s_last_poll_us) / 1000ULL);
+    const uint32_t elapsed_ms = (now - s_last_poll_us) / 1000U;
     s_last_poll_us = now;
     /* INTEGRATION FIX: the loop really runs every 20 ms (tk_dly_tsk(10) on
      * the 10 ms kernel tick), so the old 15 ms limit counted every loop as
      * a miss. */
-    if (elapsed_ms > 20U) { ++s_status.deadline_misses; }
+    if ((elapsed_ms > 20U) && (s_status.deadline_misses < UINT16_MAX))
+    {
+        ++s_status.deadline_misses;
+    }
     if (elapsed_ms == 0U) { return; }
     const uint32_t deltas[2] = {ticks[0] - s_prev_ticks[0],
                                  ticks[1] - s_prev_ticks[1]};
@@ -497,24 +600,26 @@ void b2_poll(void)
     {
         const int32_t direction = (s_requested[i] < 0) ? -1 : 1;
         const int32_t raw = direction * b2_speed_mm_s(deltas[i], elapsed_ms,
-            s_cfg.ticks_per_wheel_rev, s_cfg.wheel_circumference_mm);
-        int32_t *total = (i == 0U) ? &s_status.left_total_mm :
-                                      &s_status.right_total_mm;
-        int32_t *speed = (i == 0U) ? &s_status.left_speed_mm_s :
-                                      &s_status.right_speed_mm_s;
-        s_signed_encoder_ticks[i] += (int64_t)direction * deltas[i];
-        const int64_t total_mm = (s_signed_encoder_ticks[i] *
-            s_cfg.wheel_circumference_mm) / s_cfg.ticks_per_wheel_rev;
-        *total = (total_mm > INT32_MAX) ? INT32_MAX :
-                 (total_mm < INT32_MIN) ? INT32_MIN : (int32_t)total_mm;
-        *speed = ((*speed * 3) + raw) / 4;
+            s_cfg->ticks_per_wheel_rev, s_cfg->wheel_circumference_mm);
+        s_signed_encoder_ticks[i] += direction * (int32_t)deltas[i];
+        const int64_t total_mm = ((int64_t)s_signed_encoder_ticks[i] *
+            s_cfg->wheel_circumference_mm) / s_cfg->ticks_per_wheel_rev;
+        const int16_t total = (total_mm > INT16_MAX) ? INT16_MAX :
+                              (total_mm < INT16_MIN) ? INT16_MIN :
+                              (int16_t)total_mm;
+        if (i == 0U) { s_status.left_total_mm = total; }
+        else         { s_status.right_total_mm = total; }
+        b2_set_wheel_speed_locked(i,
+            ((b2_wheel_speed_locked(i) * 3) + raw) / 4);
     }
     s_status.last_update_us = now;
     const bool braking = (s_status.brake_latched != 0U);
+    /* CR1: was read and cleared without the lock. */
+    brake_event = (s_shared.brake_event_pending != 0U);
+    s_shared.brake_event_pending = 0U;
     app_unlock(&s_lock, irq);
-    if (s_brake_event_pending)
+    if (brake_event)
     {
-        s_brake_event_pending = false;
         b2_queue_event(B2_EVENT_BRAKED, B2_FAULT_NONE);
     }
     if (braking)
@@ -540,7 +645,8 @@ void b2_poll(void)
         if (s_status.state == B2_EXECUTE_GOAL)
         {
             if ((now - s_goal_started_us) >
-                ((uint64_t)s_active.timeout_ms * 1000ULL))
+                ((uint32_t)s_active.timeout_10ms *
+                 (B2_TIMEOUT_UNIT_MS * 1000U)))
             {
                 b2_fault_now(B2_FAULT_GOAL_TIMEOUT);
                 b2_deliver_event();
@@ -563,8 +669,11 @@ void b2_poll(void)
             }
         }
         int32_t pwm_cmd[2];
-        const int32_t actual[2] = {s_status.left_speed_mm_s,
-                                    s_status.right_speed_mm_s};
+        int32_t actual[2];
+        irq = app_lock(&s_lock);
+        actual[0] = b2_wheel_speed_locked(0U);
+        actual[1] = b2_wheel_speed_locked(1U);
+        app_unlock(&s_lock, irq);
         for (uint32_t i = 0U; i < 2U; ++i)
         {
             const int32_t request = s_requested[i];
@@ -578,28 +687,30 @@ void b2_poll(void)
             /* +-8000 * ki 8/256 = +-250 permil: room for a slope, but no
              * longer enough to drive the motor on its own (was +-20000,
              * = +-625 of the 650 permil maximum). */
-            s_integral[i] = b2_clamp(s_integral[i] + error,
-                                     -B2_INTEGRAL_LIMIT, B2_INTEGRAL_LIMIT);
-            const int32_t ff = ((int32_t)s_cfg.max_pwm_permil *
-                                b2_abs32(request)) / s_cfg.max_speed_mm_s;
-            const int32_t p = ((int32_t)s_cfg.kp_q8 * error) / 256;
+            s_integral[i] = (int16_t)b2_clamp((int32_t)s_integral[i] + error,
+                                              -B2_INTEGRAL_LIMIT,
+                                              B2_INTEGRAL_LIMIT);
+            const int32_t ff = ((int32_t)s_cfg->max_pwm_permil *
+                                b2_abs32(request)) / s_cfg->max_speed_mm_s;
+            const int32_t p = ((int32_t)s_cfg->kp_q8 * error) / 256;
             const int32_t integral =
-                ((int32_t)s_cfg.ki_q8 * s_integral[i]) / 256;
+                ((int32_t)s_cfg->ki_q8 * s_integral[i]) / 256;
             const int32_t duty = b2_clamp(ff + p + integral,
-                                             B2_MIN_OUTPUT, s_cfg.max_pwm_permil);
+                                             B2_MIN_OUTPUT, s_cfg->max_pwm_permil);
             pwm_cmd[i] = (request < 0) ? -duty : duty;
             /* INTEGRATION FIX: an encoder edge can land between reading `now`
              * and taking the lock, making the edge newer than `now`; the
              * unsigned subtraction then wraps to a huge age and a false
-             * ENCODER_STALL.  Frequent at ~450 edges/s. */
-            const uint64_t age = (edges_at_us[i] > now) ? 0ULL :
+             * ENCODER_STALL.  Frequent at ~450 edges/s.  CR1: 32-bit times,
+             * so "newer" is a wrap-safe signed compare. */
+            const uint32_t age = b2_time_after(edges_at_us[i], now) ? 0U :
                                  (now - edges_at_us[i]);
+            const uint32_t stall_us = (uint32_t)s_cfg->encoder_stall_ms * 1000U;
             if (((s_status.state == B2_EXECUTE_GOAL) ||
                  (s_status.state == B2_TRACK_SPEED)) &&
                 (b2_abs32(request) >= 40) &&
-                (age > ((uint64_t)s_cfg.encoder_stall_ms * 1000ULL)) &&
-                ((now - s_wheel_started_us[i]) >
-                  ((uint64_t)s_cfg.encoder_stall_ms * 1000ULL)))
+                (age > stall_us) &&
+                ((now - s_wheel_started_us[i]) > stall_us))
             {
                 b2_fault_now(B2_FAULT_ENCODER_STALL);
                 b2_deliver_event();
@@ -616,20 +727,29 @@ void b2_poll(void)
         }
         app_unlock(&s_lock, irq);
     }
-    if (s_stop_event_pending &&
+    /* CR1: stop_event_pending / s_last_stopped_check_us are also written by
+     * b2_stop() on other tasks: check and update them under the lock. */
+    bool stopped_event = false;
+    irq = app_lock(&s_lock);
+    if ((s_shared.stop_event_pending != 0U) &&
         ((now - s_last_stopped_check_us) >=
-         ((uint64_t)B2_STOPPED_STABLE_MS * 1000ULL)))
+         (B2_STOPPED_STABLE_MS * 1000U)))
     {
         /* This indicates commanded stop & no new edges, not proof of rest. */
         if ((deltas[0] == 0U) && (deltas[1] == 0U))
         {
-            s_stop_event_pending = false;
-            b2_queue_event(B2_EVENT_STOPPED, B2_FAULT_NONE);
+            s_shared.stop_event_pending = 0U;
+            stopped_event = true;
         }
         else
         {
             s_last_stopped_check_us = now;
         }
+    }
+    app_unlock(&s_lock, irq);
+    if (stopped_event)
+    {
+        b2_queue_event(B2_EVENT_STOPPED, B2_FAULT_NONE);
     }
     b2_deliver_event();
 }

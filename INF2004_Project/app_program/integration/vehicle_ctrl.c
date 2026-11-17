@@ -90,7 +90,7 @@ static void vc_print_health(void)
 
 	tm_printf((UB*)"[VC] S2 %s st=%d flt=%d enc=%u/%u | S3 L=%u C=%u R=%u line=%u"
 		  " | S4 %s st=%d pitch=%dcdeg a=%d/%d/%dmg | S5 st=%d front=%u%s\n",
-		  s2_ready() ? "ok" : "--", (int)s2.state, (int)s2.fault,
+		  s2_ready() ? "ok" : "--", (int)s2.state, (int)s2.fault_mask,
 		  (unsigned)s2.left_encoder_edges, (unsigned)s2.right_encoder_edges,
 		  (unsigned)s3.ir_left_raw, (unsigned)s3.ir_center_raw,
 		  (unsigned)s3.ir_right_raw, (unsigned)s3.line_detected,

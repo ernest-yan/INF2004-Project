@@ -201,7 +201,7 @@ void vehicle_get_status(vehicle_status_t *p_out)
 						   (uint8_t)EVT_SRC_IMU:
 						   (uint8_t)EVT_SRC_MOTION;
 
-	if ((m.fault != B2_FAULT_NONE) || (m.state == B2_FAULT)) {
+	if ((m.fault_mask != 0u) || (m.state == B2_FAULT)) {
 		faults |= TLM_FAULT_S2;
 	}
 	if ((l.fault_mask & (uint8_t)~FAULT_LINE_LOSS) != 0u) {
@@ -224,8 +224,8 @@ void motion_get_status(motion_status_t *p_out)
 	b2_get_status(&s);
 	mean_mm = (s.left_total_mm + s.right_total_mm) / 2;
 
-	p_out->speed_l_mm_s = clamp_u16(s.left_speed_mm_s);
-	p_out->speed_r_mm_s = clamp_u16(s.right_speed_mm_s);
+	p_out->speed_l_mm_s = clamp_u16(b2_speed_value(s.left_speed_ob));
+	p_out->speed_r_mm_s = clamp_u16(b2_speed_value(s.right_speed_ob));
 	p_out->enc_l        = s.left_encoder_edges;
 	p_out->enc_r        = s.right_encoder_edges;
 	p_out->distance_mm  = (mean_mm > 0)? (uint32_t)mean_mm: 0u;
