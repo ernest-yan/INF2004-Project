@@ -78,4 +78,9 @@ $CC -I"$PROJ/app_program/subsystem1" "$PROJ/app_program/subsystem1/tlm_codec.c" 
     "$HERE/barcode_event_enc.c" -o "$OUT/bce" && "$OUT/bce" > "$OUT/frames.txt"
 python3 -I "$HERE/test_barcode_event.py" "$PROJ/testing/subsystem1/tools/dashboard.py" < "$OUT/frames.txt" || fail=1
 
+echo "== MAP command: dashboard.py <-> C codec =="
+$CC -I"$PROJ/app_program/subsystem1" "$PROJ/app_program/subsystem1/tlm_codec.c" \
+    "$HERE/map_cmd_enc.c" -o "$OUT/mce"
+python3 -I "$HERE/test_map_cmd.py" "$PROJ/testing/subsystem1/tools/dashboard.py" "$OUT/mce" || fail=1
+
 [ $fail -eq 0 ] && echo "ALL CR1 HOST TESTS PASSED" || { echo "CR1 HOST TESTS FAILED"; exit 1; }

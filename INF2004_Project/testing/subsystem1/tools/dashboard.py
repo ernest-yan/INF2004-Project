@@ -221,11 +221,27 @@ def decode_online(data: bytes) -> dict:
     return {"version": ver, "online": bool(online), "session": r.get(16)}
 
 
+def code_from_letter(c: str) -> int:
+    """'A'..'Z' / '0'..'9' -> 6-bit letter code (inverse of letter_from_code)."""
+    if "A" <= c <= "Z":
+        return ord(c) - ord("A") + 1
+    if "0" <= c <= "9":
+        return ord(c) - ord("0") + 27
+    return 0
+
+
 def encode_cmd(code: int, session: int, seq: int, letters: str = "") -> bytes:
     """5 bytes: version(4) cmd(4) session(16) seq(16).
-    MAP adds 4 ASCII letters (forward, U-turn, left, right): 9 bytes."""
-    return (bytes([(VERSION << 4) | code]) + session.to_bytes(2, "big")
-            + seq.to_bytes(2, "big") + letters.encode("ascii"))
+    MAP adds 4 letters (forward, U-turn, left, right) as 6-bit codes
+    (CR1 minimum-bit): 24 more bits, 8 bytes in total."""
+    head = (bytes([(VERSION << 4) | code]) + session.to_bytes(2, "big")
+            + seq.to_bytes(2, "big"))
+    if not letters:
+        return head
+    packed = 0
+    for c in letters:
+        packed = (packed << 6) | code_from_letter(c)
+    return head + packed.to_bytes(3, "big")
 
 
 def enc_delta(new: int, old: int) -> int:

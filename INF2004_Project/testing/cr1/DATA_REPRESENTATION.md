@@ -88,7 +88,7 @@ The wire keeps the existing 8-bit per-subsystem `fault_mask` (bit n = subsystem 
 | tilt | 0..127 °, saturates | 7 | uint |
 | s5_fault | 7 values | 3 | enum code |
 
-Other frames: online 24 bits (3 B), heartbeat 86 bits (11 B), ACK 52 bits (7 B), event ≤ 78 bits (10 B), command 40 bits (5 B), `map` command 72 bits (9 B). Field-by-field layouts are in `tlm_codec.h`.
+Other frames: online 24 bits (3 B), heartbeat 86 bits (11 B), ACK 52 bits (7 B), event ≤ 78 bits (10 B), command 40 bits (5 B), `map` command 64 bits (8 B; was 72 bits / 9 B with 8-bit ASCII letters until 19 Nov). Field-by-field layouts are in `tlm_codec.h`.
 
 ### S1 RAM data
 
@@ -298,6 +298,7 @@ Packing must not drop or narrow any data the specification asks for.
 | System fault bitmask | `uint16_t app_fault_mask` with set/clear under a lock | `system_fault_mask()` builds the same 16 bits on demand from each subsystem's fault bitmask | No second copy of the faults to keep in step, and no writer, so no lock. The bit layout is the table above (`SYS_FLT_*` in `team_interfaces.h`). |
 | `vehicle_event_t` | 8 B | 8 B | 53 bits of data; 8 B once aligned. |
 | BARCODE event (MQTT), added 19 Nov | action only (3 bits) | action 3 bits + **letter 6 bits** (0 none, 1–26 A–Z, 27–36 0–9); action NONE + letter 0 = "barcode seen, not decoded". Frame 5 → 6 B | Rubric #1/#2: the decoded letter (and a failed read) must be visible on telemetry; before, an unmapped letter showed only as INVALID. The only MQTT layout change; `dashboard.py` updated, old 5-byte frames still decode. |
+| MAP command (MQTT), 19 Nov | 4 × 8-bit ASCII letters (72 bits, 9 B) | 4 × 6-bit letter codes (64 bits, **8 B**) | CR1 covers command payloads too. Same codes as the BARCODE event and S3. `dashboard.py` updated; an old 9-byte MAP is refused (BAD_LEN). |
 | `LineBarcodeData_t.scan_fail_count`, added 19 Nov | – | 2 bits in the existing spare bits (struct stays 4 B) | Counts barcode-sized scans that gave no letter. Scans end ≥ 400 ms apart and S1 reads every 200 ms, so a 2-bit wrapping counter cannot miss one. |
 | `line_status_t`, added 19 Nov | 2 B | 3 B | + letter (6 bits) + failed-scan count (2 bits). |
 

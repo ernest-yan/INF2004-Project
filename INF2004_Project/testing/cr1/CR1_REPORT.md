@@ -84,7 +84,7 @@ Every frame is bit-packed, most-significant bit first ([tlm_codec.h](../../app_p
 | Event (max) | 78 | 10 | – |
 | BARCODE event | 35 → 41 | 5 → 6 | – (19 Nov: now also carries the decoded letter as a 6-bit code, and reports "seen, not decoded" scans) |
 | ACK | 52 | 7 | – |
-| Command / `map` command | 40 / 72 | 5 / 9 | – |
+| Command / `map` command | 40 / **64** (was 72) | 5 / **8** (was 9) | – (19 Nov: map letters as 6-bit codes instead of 8-bit ASCII) |
 
 The JSON figure comes from the codec's own `tlm_format_status_json()` on the same status values ([json_vs_binary.c](host_test/json_vs_binary.c)). At 5 Hz, binary status costs 105 B/s against about 1,285 B/s as text.
 

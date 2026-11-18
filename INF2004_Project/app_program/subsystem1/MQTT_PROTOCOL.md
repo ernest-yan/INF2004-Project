@@ -35,7 +35,7 @@ On the MQTT build the car **waits for `start`** before it drives (IF-18).
 | `is33/car/heartbeat` | car → laptop | 0 | no | 1 Hz | HEARTBEAT frame (11 B) |
 | `is33/car/event` | car → laptop | 1 | no | on change | EVENT frame (5–10 B) |
 | `is33/car/ack` | car → laptop | 1 | no | one per command | ACK frame (7 B) |
-| `is33/car/cmd` | laptop → car | 1 (subscribed) | must not be | on demand | COMMAND frame (5 or 9 B) |
+| `is33/car/cmd` | laptop → car | 1 (subscribed) | must not be | on demand | COMMAND frame (5 or 8 B) |
 
 Why these choices:
 - **QoS 0 for status and heartbeat:** they repeat every 200 ms / 1 s, so a lost one is replaced by the next.
@@ -137,7 +137,7 @@ When each event is sent: on a change seen by the 5 Hz status task.
 
 The ACK says the command was **accepted and queued**, not that it has been carried out. The telemetry task carries it out within about 50 ms; the result shows in STATUS and on the console.
 
-### 3.7 COMMAND (`is33/car/cmd`, laptop → car): 40 bits = 5 B, or 72 bits = 9 B for `map`
+### 3.7 COMMAND (`is33/car/cmd`, laptop → car): 40 bits = 5 B, or 64 bits = 8 B for `map`
 
 | Field | Bits | Meaning |
 |---|---:|---|
@@ -145,7 +145,7 @@ The ACK says the command was **accepted and queued**, not that it has been carri
 | code | 4 | 1 START, 2 STOP, 3 E-STOP, 4 RESET, 5 MAP |
 | session | 16 | Must equal the session in the car's current ONLINE message |
 | seq | 16 | Must be higher than the last accepted seq of this session |
-| map letters | 4 × 8 | **MAP only**: four different ASCII letters/digits (`A–Z`, `0–9`) for forward, U-turn, left, right |
+| map letters | 4 × 6 | **MAP only**: four different letters/digits for forward, U-turn, left, right, as 6-bit codes (1–26 = `A–Z`, 27–36 = `0–9`; 0 and 37–63 are refused). Before 19 Nov 2026 these were 8-bit ASCII (9-byte frame); a 9-byte MAP is now refused with BAD_LEN |
 
 ## 4. Value tables
 
@@ -179,10 +179,10 @@ It is derived from the 16-bit system fault bitmask (`SYS_FLT_*` in `team_interfa
 | Code | Name | Meaning |
 |---:|---|---|
 | 0 | ACCEPTED | Valid and queued |
-| 1 | BAD_LEN | Not 5 B (or not 9 B for MAP, or 9 B for another command) |
+| 1 | BAD_LEN | Not 5 B (or not 8 B for MAP, or 8 B for another command) |
 | 2 | BAD_VERSION | Version is not 1 |
 | 3 | BAD_SESSION | Wrong session: sent to an old connection, or a retained message |
-| 4 | BAD_CMD | Unknown code, or an invalid MAP (bad or repeated letter) |
+| 4 | BAD_CMD | Unknown code, or an invalid MAP (code that is not a letter, or a repeated letter) |
 | 5 | STALE_SEQ | seq not above the last accepted one: a replay or QoS 1 duplicate |
 | 6 | QUEUE_FULL | Valid, but four commands were already waiting |
 

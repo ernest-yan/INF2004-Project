@@ -24,8 +24,9 @@
 #define TLM_ACK_LEN             (7u)    /*  52 bits */
 #define TLM_EVENT_MAX_LEN       (10u)   /*  78 bits, obstacle profile */
 #define TLM_CMD_LEN             (5u)    /*  40 bits */
-#define TLM_CMD_MAP_LEN         (9u)    /*  72 bits: header + 4 letters */
+#define TLM_CMD_MAP_LEN         (8u)    /*  64 bits: header + 4 x 6-bit letters */
 #define TLM_MAP_LETTERS         (4u)    /* forward, U-turn, left, right */
+#define TLM_LETTER_BITS         (6u)    /* letter code: 0 none, 1-26 A-Z, 27-36 0-9 */
 
 /* ---------- Commands (dashboard -> car) ---------- */
 typedef enum
