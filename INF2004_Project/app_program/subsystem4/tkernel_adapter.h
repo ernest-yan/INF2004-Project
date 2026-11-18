@@ -25,6 +25,14 @@
 #define S4_SAMPLE_MS		10	/* accelerometer poll period */
 #define S4_RETRY_MS		1000	/* retry period while the sensor is absent */
 #define S4_WHEEL_TRACK_MM	120	/* keep equal to S2's B2_CAL_WHEEL_TRACK_MM */
+#define S4_WHEELBASE_MM		131	/* EFFECTIVE wheelbase, CALIBRATED: hump
+					   height = this x sin(peak tilt), so
+					   it scales every reading. 17 Nov:
+					   6 crossings of the 10 mm course hump
+					   read 6-10 mm (mean 7.3) at 96, so
+					   96 x 10 / 7.3 = 131. It absorbs the
+					   filter lag on the tilt peak; re-check
+					   if the IMU mount or speed changes. */
 
 /* TRUE once the LSM303DLHC answered and was configured. */
 IMPORT BOOL s4_ready(void);

@@ -26,7 +26,7 @@ EXPORT void subsystem2_test(void)
 
 	/* S2-U02: idle state after start-up */
 	b2_get_status(&st);
-	TEST_CHECK("S2-U02", st.state == B2_READY && st.fault == B2_FAULT_NONE &&
+	TEST_CHECK("S2-U02", st.state == B2_READY && st.fault_mask == 0U &&
 		   st.left_pwm_permil == 0 && st.right_pwm_permil == 0,
 		   "READY, no fault, both PWM outputs zero");
 

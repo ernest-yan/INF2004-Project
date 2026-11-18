@@ -19,7 +19,7 @@
 
 /* Encoded frame sizes in bytes (bits rounded up to whole bytes). */
 #define TLM_ONLINE_LEN          (3u)    /*  24 bits */
-#define TLM_STATUS_LEN          (21u)   /* 163 bits */
+#define TLM_STATUS_LEN          (21u)   /* 166 bits */
 #define TLM_HEARTBEAT_LEN       (11u)   /*  86 bits */
 #define TLM_ACK_LEN             (7u)    /*  52 bits */
 #define TLM_EVENT_MAX_LEN       (10u)   /*  78 bits, obstacle profile */
@@ -82,6 +82,7 @@ typedef struct
     uint8_t  motion;            /* 3 bits, b4_motion_t */
     uint16_t up_speed_mm_s;     /* 8 bits, sent as value / 4: 0..1020 mm/s */
     uint8_t  tilt_deg;          /* 7 bits, 0..127, saturates */
+    uint8_t  s5_fault;          /* 3 bits, subsystem5_fault_t */
 } tlm_status_t;
 
 /* ---------- Heartbeat frame (car -> dashboard, 1 Hz) ---------- */

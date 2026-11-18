@@ -30,7 +30,7 @@
  *	  IF-01  S3 -> S3   message buffer mbf_barcode   (owned by S3)
  *	  IF-02  S5 -> VC   message buffer mbf_s5_events (owned by S5)
  *	  IF-03  VC, S3, S5 -> S2   b2_stop() / b2_submit_command() function API
- *	  IF-04  S4 -> S2   b2_emergency_brake() on impact / sensor fault
+ *	  IF-04  S4 -> S2   b2_emergency_brake() on lift / overturn / sensor fault
  *	  IF-05  S2 -> S4   b2_get_status() odometry -> b4_update_travel_mm()
  *	  IF-06  VC -> S5   subsystem5_confirm_robot_stopped()
  *	  IF-07  S5 -> S3   subsystem5_get_status(): S3 holds while S5 is busy

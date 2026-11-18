@@ -20,7 +20,7 @@ subsystem, ask its owner or open a pull request for them to review.
 | 1 | WiFi telemetry + remote commands over MQTT (no pins of its own) | 2502568 | caveman37 | `app_program/subsystem1/` | `testing/subsystem1/` |
 | 2 | Motion control: 2 DC motors (PWM) + 2 wheel encoders, speed/distance/turn goals, emergency brake | | | `app_program/subsystem2/` | `testing/subsystem2/` |
 | 3 | Line sensors + Code 39 barcode reader (left/centre IR line sensors, right IR barcode sensor) | | | `app_program/subsystem3/` | `testing/subsystem3/` |
-| 4 | GY-511 (LSM303DLHC) accelerometer: impact detection -> brake, hump-height profile | | | `app_program/subsystem4/` | `testing/subsystem4/` |
+| 4 | GY-511 (LSM303DLHC) accelerometer: lifted / overturned detection -> brake (latched, ends the run), hump-height profile, turn rate, motion class | | | `app_program/subsystem4/` | `testing/subsystem4/` |
 | 5 | HC-SR04 ultrasonic + SG90 servo: obstacle stop request and obstacle profile scan | | | `app_program/subsystem5/` | `testing/subsystem5/` |
 | — | *Team glue:* `vehicle_ctrl` task (connects S2/S3/S4/S5) | all | | `app_program/integration/` | `testing/integration/` |
 
@@ -169,7 +169,7 @@ sends to it or waits on it. Agree on the data format before coding.
 | IF-01 | S3 → S3 | message buffer (owned by S3) | `mbf_barcode` | 1 byte per decoded Code 39 character ('A'–'Z'); `line_follow_task` receives with `tk_rcv_mbf` | |
 | IF-02 | S5 → VC | message buffer (owned by S5) | `mbf_s5_events` | one `subsystem5_event_t` per STOP_REQUIRED / PROFILE_READY / FAULT; the VC must keep draining it | |
 | IF-03 | VC, S3, S5 → S2 | function API (`motion.h`) | — | `b2_stop()`, `b2_submit_command()`, `b2_goal_start()`, `b2_goal_check()`, `b2_get_status()`; lock-protected, any task/core | |
-| IF-04 | S4 → S2 | function call | — | `b2_emergency_brake()` on impact or IMU fault (latched until `b2_authorized_reset_while_stopped()`) | |
+| IF-04 | S4 → S2 | function call | — | `b2_emergency_brake()` when the robot is lifted or overturned, or on an IMU fault (latched until `b2_authorized_reset_while_stopped()`) | |
 | IF-05 | S2 → S4 | function call | — | `imu_task` reads `b2_get_status()` odometry and feeds `b4_update_travel_mm()` | |
 | IF-06 | VC → S5 | function call | — | `subsystem5_confirm_robot_stopped()` once the encoders are quiet for 100 ms | |
 | IF-07 | S5 → S3 | function call | — | `subsystem5_get_status()`: S3 only drives while S5 is in MONITOR with no stop request | |
@@ -181,7 +181,7 @@ sends to it or waits on it. Agree on the data format before coding.
 | IF-13 | S1 (WiFi task) → S1 (telemetry task) | message buffer (owned by S1) + `tk_wup_tsk` | `s1_mbf_cmd` | one `S1_CMD` per accepted remote command (START / STOP / E-STOP / RESET / MAP), max 4 queued; carried out by `s1_telemetry_task` (IF-15 to IF-18) | |
 | IF-14 | S1 → kernel WiFi task | message buffer (owned by S1) | `s1_mbf_out` | telemetry frames (1 topic-ID byte + payload); emptied with `TMO_POL` by S1's hook in the shared `lib/liblwip/sysdepend/pico_rp2040/mqtt_utk.c` | |
 | IF-15 | S1 → S2 | function API (`motion.h`) | — | remote E-STOP → `b2_emergency_brake()` (latched); STOP → `b2_stop()`; RESET → `b2_authorized_reset_while_stopped()` (S2 refuses if an encoder ticked in the last 200 ms). From `s1_telemetry_task` only. **Proposed, awaiting team OK** | |
-| IF-16 | S1 → S4, S1 → S5 | function call | — | remote RESET only, and only if the wheels are not being driven: `b4_authorized_reset_while_stopped()` if an impact or fault is latched (S4 then recalibrates), `subsystem5_reset_fault_while_stopped()` if S5 is in FAULT. **Proposed, awaiting team OK** | |
+| IF-16 | S1 → S4, S1 → S5 | function call | — | remote RESET only, and only if the wheels are not being driven: `b4_authorized_reset_while_stopped()` if a lift / overturn or fault is latched (S4 then recalibrates), `subsystem5_reset_fault_while_stopped()` if S5 is in FAULT. **Proposed, awaiting team OK** | |
 | IF-17 | S1 → S3 | function call | — | remote MAP (4 letters/digits: forward, U-turn, left, right) → `set_mqtt_action_mapping()`, sent as command code 5 on `is33/car/cmd` (dashboard: `map FULR`). `S3_BENCH_MAPPING` is now 0: until a MAP arrives every barcode means "straight on". **Awaiting Buddy 3's review** | |
 | IF-18 | S1 → S3 | function call (`subsystem1.h`) | — | `s1_mission_go()`: TRUE after a remote START, FALSE after STOP / E-STOP / RESET. At power-on FALSE in `MQTT=1` builds (robot waits for START), TRUE in builds without MQTT (nobody can send START, so it drives as before). S3's `line_follow_allowed()` checks it. S5's obstacle bypass does not check it (E-STOP still stops everything). **Awaiting Buddy 3's review** | |
 

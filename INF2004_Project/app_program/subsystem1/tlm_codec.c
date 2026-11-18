@@ -192,6 +192,7 @@ tlm_encode_status(const tlm_status_t *p_s, uint8_t *p_buf, uint32_t cap)
     bw_put_sat(&w, p_s->motion, 3u);
     bw_put_sat(&w, (uint32_t) p_s->up_speed_mm_s / UP_SPEED_STEP, 8u);
     bw_put_sat(&w, p_s->tilt_deg, 7u);
+    bw_put_sat(&w, p_s->s5_fault, 3u);
     return bw_finish(&w);
 }
 
@@ -378,7 +379,8 @@ tlm_format_status_json(const tlm_status_t *p_s, char *p_buf, uint32_t cap)
     jw_field(&j, "yaw_dps", (int32_t) p_s->yaw_dps, false);
     jw_field(&j, "motion", (int32_t) p_s->motion, false);
     jw_field(&j, "up_speed", (int32_t) p_s->up_speed_mm_s, false);
-    jw_field(&j, "tilt", (int32_t) p_s->tilt_deg, true);
+    jw_field(&j, "tilt", (int32_t) p_s->tilt_deg, false);
+    jw_field(&j, "s5_fault", (int32_t) p_s->s5_fault, true);
     jw_char(&j, '}');
 
     p_buf[j.len] = '\0';

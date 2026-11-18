@@ -45,12 +45,15 @@ IMPORT void s1_tlm_get_diag(S1_DIAG *p_out);
 
 /* Counters kept by the bridge (written only by the WiFi service task,
  * read by our telemetry task for the heartbeat). */
+/* CR1: the counters are sent as 8-bit wrapping heartbeat fields, so they
+ * are 8-bit here too (20 -> 8 bytes). One writer (WiFi task), one byte
+ * each: every update is a single byte store. */
 typedef struct {
-	UW	cmds_ok;
-	UW	cmds_rejected;
-	UW	queue_full;
-	UW	reconnects;
 	UW	last_cmd_us;		/* command received -> handed over */
+	UB	cmds_ok;
+	UB	cmds_rejected;
+	UB	queue_full;
+	UB	reconnects;
 } S1_STATS;
 
 /* Read-only views of the bridge state, safe from our telemetry task. */

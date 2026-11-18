@@ -109,24 +109,40 @@ static const Code39Map CODE39_TABLE[] = {
 
 static LineBarcodeData_t g_system_data = {0};
 
-static char g_mqtt_map_forward = '\0';
-static char g_mqtt_map_uturn   = '\0';
-static char g_mqtt_map_left    = '\0';
-static char g_mqtt_map_right   = '\0';
+/* CR1: the four MQTT map letters as 6-bit codes in ONE word (24 bits):
+ * forward bits 0-5, U-turn 6-11, left 12-17, right 18-23.  Written with a
+ * single aligned 32-bit store, so a reader on another task can never see
+ * half an old and half a new mapping (the four separate chars could). */
+#define S3_MAP_FWD      (0U)
+#define S3_MAP_UTURN    (6U)
+#define S3_MAP_LEFT     (12U)
+#define S3_MAP_RIGHT    (18U)
+#define S3_MAP_MASK     (0x3FU)
+static volatile uint32_t g_mqtt_map = 0U;
 
-/* One duration per completed HIGH/LOW element. */
-static uint32_t g_widths[MAX_BARS];
-static uint8_t g_width_count = 0;
+/* One duration per completed HIGH/LOW element.
+ * CR1: uint16_t in 8 us units (max 524 ms, saturating) instead of uint32_t
+ * microseconds: half the RAM.  A 1 mm bar at 70 mm/s is ~14 000 us, so the
+ * 8 us step is far below the decoder's narrow/wide margin. */
+#define S3_WIDTH_UNIT_US	(8U)
+static uint16_t g_widths[MAX_BARS];
 static uint32_t g_last_edge_time = 0;
-static bool g_last_sensor_state = false;
-static bool g_sensor_state_initialized = false;
-static bool g_edge_pending = false;		/* GP16 changed, not yet held */
 static uint32_t g_edge_pending_since = 0;
 static uint32_t g_last_success_decode_time = 0;
-static bool g_have_successful_decode = false;
-/* TRUE while GP16 is collecting a barcode (first edge until the quiet
-   timeout).  Read by line_follow_task on the other core: one aligned byte. */
-static volatile bool g_scan_active = false;
+
+/* CR1: barcode-task state.  Written ONLY by the barcode task (single
+ * writer, so the bit-field read-modify-write cannot race).  scan_active is
+ * also READ by line_follow_task on the other core: hence volatile. */
+static volatile struct {
+    uint8_t width_count : 6;		/* 0..MAX_BARS (60) */
+    uint8_t last_sensor_state : 1;
+    uint8_t sensor_state_initialized : 1;
+    uint8_t edge_pending : 1;		/* GP16 changed, not yet held */
+    uint8_t have_successful_decode : 1;
+    uint8_t scan_active : 1;		/* GP16 is collecting a barcode (first
+					   edge until the quiet timeout) */
+    uint8_t : 5;
+} g_bc;
 
 /* Reverse exactly nine bits so scans in either direction can be matched. */
 static uint16_t reverse_9bits(uint16_t value)
@@ -145,25 +161,30 @@ void set_mqtt_action_mapping(char char_fwd,
                              char char_left,
                              char char_right)
 {
+    const uint32_t map =
+        ((uint32_t)s3_char_to_code(char_fwd)   << S3_MAP_FWD) |
+        ((uint32_t)s3_char_to_code(char_uturn) << S3_MAP_UTURN) |
+        ((uint32_t)s3_char_to_code(char_left)  << S3_MAP_LEFT) |
+        ((uint32_t)s3_char_to_code(char_right) << S3_MAP_RIGHT);
     data_lock();	/* PORT: was save_and_disable_interrupts() */
-    g_mqtt_map_forward = char_fwd;
-    g_mqtt_map_uturn   = char_uturn;
-    g_mqtt_map_left    = char_left;
-    g_mqtt_map_right   = char_right;
+    g_mqtt_map = map;	/* CR1: one store */
     data_unlock();	/* PORT: was restore_interrupts() */
 }
 
 MovementAction_t get_action_for_character(char c)
 {
-    if (c == '\0') return MOVE_NONE;
+    const uint32_t code = s3_char_to_code(c);
+    const uint32_t map = g_mqtt_map;	/* CR1: one consistent read */
 
-    if (g_mqtt_map_forward != '\0' && c == g_mqtt_map_forward)
+    if (code == S3_CODE_NONE) return MOVE_NONE;
+
+    if (((map >> S3_MAP_FWD) & S3_MAP_MASK) == code)
         return MOVE_FORWARD;
-    if (g_mqtt_map_uturn != '\0' && c == g_mqtt_map_uturn)
+    if (((map >> S3_MAP_UTURN) & S3_MAP_MASK) == code)
         return MOVE_UTURN;
-    if (g_mqtt_map_left != '\0' && c == g_mqtt_map_left)
+    if (((map >> S3_MAP_LEFT) & S3_MAP_MASK) == code)
         return MOVE_LEFT;
-    if (g_mqtt_map_right != '\0' && c == g_mqtt_map_right)
+    if (((map >> S3_MAP_RIGHT) & S3_MAP_MASK) == code)
         return MOVE_RIGHT;
 
     return MOVE_NONE;
@@ -176,10 +197,10 @@ void line_barcode_init(void)
     gpio_set_pin(PIN_IR_CENTER, GPIO_MODE_IN);
     gpio_set_pin(PIN_IR_RIGHT,  GPIO_MODE_IN);
 
-    g_width_count = 0;
+    g_bc.width_count = 0;
     g_last_edge_time = 0;
-    g_sensor_state_initialized = false;
-    g_have_successful_decode = false;
+    g_bc.sensor_state_initialized = 0U;
+    g_bc.have_successful_decode = 0U;
 }
 
 LineBarcodeData_t get_line_barcode_data_safe(void)
@@ -265,7 +286,7 @@ static bool classify_at(uint8_t start, uint16_t *pattern_out)
     uint32_t candidate[9];
 
     for (int i = 0; i < 9; ++i) {
-        candidate[i] = g_widths[start + i];
+        candidate[i] = g_widths[start + i];	/* 8 us units: ratios kept */
     }
     return classify_nine(candidate, pattern_out);
 }
@@ -280,10 +301,10 @@ static bool classify_at(uint8_t start, uint16_t *pattern_out)
  */
 static char decode_collected_scan(void)
 {
-    if (g_width_count < CODE39_FRAME_ELEMENTS) return '\0';
+    if (g_bc.width_count < CODE39_FRAME_ELEMENTS) return '\0';
 
     for (uint8_t start = 0;
-         (uint16_t)start + CODE39_FRAME_ELEMENTS <= g_width_count; ++start) {
+         (uint16_t)start + CODE39_FRAME_ELEMENTS <= g_bc.width_count; ++start) {
         uint16_t first, letter, last;
 
         if (!classify_at(start, &first) ||
@@ -309,14 +330,21 @@ static char decode_collected_scan(void)
     return '\0';
 }
 
-static void append_duration(uint32_t duration)
+static void append_duration(uint32_t duration_us)
 {
-    if (duration < MIN_EDGE_US) {
+    if (duration_us < MIN_EDGE_US) {
         return; /* Ignore very short noise pulses. */
     }
 
-    if (g_width_count < MAX_BARS) {
-        g_widths[g_width_count++] = duration;
+    /* CR1: round to 8 us units, saturating at 65535 (524 ms). */
+    const uint32_t units = (duration_us + (S3_WIDTH_UNIT_US / 2U)) /
+                           S3_WIDTH_UNIT_US;
+    const uint16_t duration = (units > UINT16_MAX) ? (uint16_t)UINT16_MAX
+                                                   : (uint16_t)units;
+
+    if (g_bc.width_count < MAX_BARS) {
+        g_widths[g_bc.width_count] = duration;
+        g_bc.width_count++;
     } else {
         /* Keep the newest measurements in a rolling buffer. */
         for (uint8_t i = 1; i < MAX_BARS; ++i) {
@@ -343,29 +371,29 @@ void process_sensors_distance_packed(uint32_t current_ticks,
      * Seed the edge timer from the first sample. Do not treat startup time as
      * the duration of the first barcode element.
      */
-    if (!g_sensor_state_initialized) {
-        g_last_sensor_state = ir_right;
+    if ((g_bc.sensor_state_initialized == 0U)) {
+        g_bc.last_sensor_state = ir_right ? 1U : 0U;
         g_last_edge_time = now_us;
-        g_sensor_state_initialized = true;
-    } else if (ir_right != g_last_sensor_state) {
+        g_bc.sensor_state_initialized = 1U;
+    } else if ((ir_right ? 1U : 0U) != g_bc.last_sensor_state) {
         /*
          * Debounce: accept an edge only once the new level has held for
          * S3_EDGE_DEBOUNCE_US.  The edge is timestamped where the change
          * began, so real widths are not shortened; flickers at a bar edge
          * are dropped instead of becoming two fake elements.
          */
-        if (!g_edge_pending) {
-            g_edge_pending = true;
+        if ((g_bc.edge_pending == 0U)) {
+            g_bc.edge_pending = 1U;
             g_edge_pending_since = now_us;
         }
         if ((uint32_t)(now_us - g_edge_pending_since) >= S3_EDGE_DEBOUNCE_US) {
             append_duration(g_edge_pending_since - g_last_edge_time);
             g_last_edge_time = g_edge_pending_since;
-            g_last_sensor_state = ir_right;
-            g_edge_pending = false;
+            g_bc.last_sensor_state = ir_right ? 1U : 0U;
+            g_bc.edge_pending = 0U;
         }
     } else {
-        g_edge_pending = false;	/* flicker ended: back to the old level */
+        g_bc.edge_pending = 0U;	/* flicker ended: back to the old level */
     }
 
     uint32_t quiet_time = now_us - g_last_edge_time;
@@ -378,24 +406,24 @@ void process_sensors_distance_packed(uint32_t current_ticks,
     {
         static uint32_t dbg_last_us = 0;
         /* Only while idle: printing mid-scan would distort bar widths. */
-        if (g_width_count == 0 && now_us - dbg_last_us >= 2000000u) {
+        if (g_bc.width_count == 0 && now_us - dbg_last_us >= 2000000u) {
             dbg_last_us = now_us;
             tm_printf((UB*)"[S3 dbg] idle  GP16=%d  L=%d  C=%d\n",
                       ir_right ? 1 : 0, ir_left ? 1 : 0, ir_center ? 1 : 0);
         }
-        if (quiet_time >= TIMEOUT_US && g_width_count > 0) {
+        if (quiet_time >= TIMEOUT_US && g_bc.width_count > 0) {
             /* Element 0 is the idle time before the first edge. */
             tm_printf((UB*)"[S3 dbg] scan ended: %d elements (need %d+), us:",
-                      g_width_count, CODE39_FRAME_ELEMENTS);
-            for (uint8_t i = 0; i < g_width_count; ++i) {
-                tm_printf((UB*)" %u", (unsigned)g_widths[i]);
+                      g_bc.width_count, CODE39_FRAME_ELEMENTS);
+            for (uint8_t i = 0; i < g_bc.width_count; ++i) {
+                tm_printf((UB*)" %u", (unsigned)g_widths[i] * S3_WIDTH_UNIT_US);
             }
             tm_printf((UB*)"\n");
         }
     }
 #endif
-    if (g_width_count >= 9 && quiet_time >= TIMEOUT_US) {
-        bool cooldown_over = !g_have_successful_decode ||
+    if (g_bc.width_count >= 9 && quiet_time >= TIMEOUT_US) {
+        bool cooldown_over = (g_bc.have_successful_decode == 0U) ||
             (uint32_t)(now_us - g_last_success_decode_time) >=
                 DECODE_COOLDOWN_US;
 
@@ -403,23 +431,23 @@ void process_sensors_distance_packed(uint32_t current_ticks,
             decoded_char = decode_collected_scan();
             if (decoded_char != '\0') {
                 g_last_success_decode_time = now_us;
-                g_have_successful_decode = true;
+                g_bc.have_successful_decode = 1U;
             }
         }
 #if APP_BARCODE_ONLY
         if (decoded_char == '\0') {
             tm_printf((UB*)"[barcode] no letter (%d bars+spaces seen, a full"
-                      " barcode is %d)\n", g_width_count - 1,
+                      " barcode is %d)\n", g_bc.width_count - 1,
                       CODE39_FRAME_ELEMENTS);
         }
 #endif
 
-        g_width_count = 0;
-    } else if (quiet_time >= TIMEOUT_US && g_width_count > 0) {
+        g_bc.width_count = 0;
+    } else if (quiet_time >= TIMEOUT_US && g_bc.width_count > 0) {
         /* Incomplete scan; discard it after the quiet timeout. */
-        g_width_count = 0;
+        g_bc.width_count = 0;
     }
-    g_scan_active = (g_width_count > 0);
+    g_bc.scan_active = (g_bc.width_count > 0U) ? 1U : 0U;
 
     /* Line tracking: retain the original active-HIGH logic. */
     uint8_t line_state = (ir_left || ir_center) ? 1u : 0u;
@@ -432,24 +460,20 @@ void process_sensors_distance_packed(uint32_t current_ticks,
     g_system_data.ir_right_raw = ir_right ? 1u : 0u;
     g_system_data.line_detected = line_state;
     g_system_data.cross_junction = cross_state;
-    g_system_data.scanned_char = decoded_char;
+    g_system_data.scanned_code = s3_char_to_code(decoded_char);
     if (decoded_char != '\0') {	/* S1: kept for slow readers (telemetry) */
         g_system_data.barcode_count++;
-        g_system_data.last_char = decoded_char;
+        g_system_data.last_code = s3_char_to_code(decoded_char);
     }
 
-    if (!line_state) {
-        g_system_data.fault_mask |= FAULT_LINE_LOSS;
-    } else {
-        g_system_data.fault_mask &= (uint8_t)~FAULT_LINE_LOSS;
-    }
+    g_system_data.fault_mask = line_state ? 0U : FAULT_LINE_LOSS;
 
     if (out_data != NULL) {
         *out_data = g_system_data;
     }
 
     /* One-cycle event: the caller receives the character through out_data. */
-    g_system_data.scanned_char = '\0';
+    g_system_data.scanned_code = S3_CODE_NONE;
 
     data_unlock();	/* PORT: was restore_interrupts() */
 }
@@ -490,12 +514,23 @@ typedef enum {
 	LF_TURN		/* the turn for the stored barcode is running */
 } line_follow_state_t;
 
-/* Read by S5 from another task: see s3_line_following(). */
-static volatile BOOL s_lf_following = FALSE;
+/* CR1: line_follow_task flags, one bit each (were BOOLs, 4 bytes each).
+ * Written ONLY by line_follow_task (single writer: no RMW race).
+ * following is also read by S5 from another task (s3_line_following()):
+ * hence volatile. */
+static volatile struct {
+	uint8_t following : 1;
+	uint8_t hold : 1;		/* holding straight for a barcode scan */
+	uint8_t searching : 1;
+	uint8_t turning : 1;
+	uint8_t last_go_left : 1;
+	uint8_t exiting : 1;
+	uint8_t : 2;
+} s_lf;
 
 EXPORT BOOL s3_line_following(void)
 {
-	return s_lf_following;
+	return (s_lf.following != 0U) ? TRUE : FALSE;
 }
 
 /* TRUE when S3 may drive: the operator sent START (S1), no S5 obstacle
@@ -518,24 +553,19 @@ static BOOL line_follow_allowed(void)
 
 static void line_follow_drive(const LineBarcodeData_t *d, BOOL *line_is_left)
 {
-	static BOOL hold = FALSE;
 	static uint32_t hold_since = 0u;
-	static BOOL searching = FALSE;
 	static uint32_t search_since = 0u;
 	static uint32_t last_call = 0u;
-	static BOOL turning = FALSE;
-	static BOOL last_go_left = FALSE;
 	static uint32_t steer_since = 0u;
-	static BOOL exiting = FALSE;
 	static uint32_t exit_since = 0u;
 	b2_command_t cmd = {0};
 
 	/* Not called for a while (stopped, junction turn): start fresh. */
 	if ((uint32_t)(app_time_us_32() - last_call) >
 	    (10u * S3_FOLLOW_PERIOD_MS * 1000u)) {
-		searching = FALSE;
-		turning = FALSE;
-		exiting = FALSE;
+		s_lf.searching = 0U;
+		s_lf.turning = 0U;
+		s_lf.exiting = 0U;
 	}
 	last_call = app_time_us_32();
 
@@ -546,17 +576,17 @@ static void line_follow_drive(const LineBarcodeData_t *d, BOOL *line_is_left)
 	   Only while the centre sensor is still on the line: on a right-hand
 	   curve the line itself passes under GP16, and holding straight then
 	   drives the car off the curve. */
-	if (g_scan_active && d->ir_center_raw) {
-		if (!hold) {
-			hold = TRUE;
+	if ((g_bc.scan_active != 0U) && d->ir_center_raw) {
+		if (!s_lf.hold) {
+			s_lf.hold = 1U;
 			hold_since = app_time_us_32();
 		}
 	} else {
-		hold = FALSE;
+		s_lf.hold = 0U;
 	}
 
 	cmd.type = B2_CMD_SPEED;
-	if (hold && ((uint32_t)(app_time_us_32() - hold_since) <
+	if (s_lf.hold && ((uint32_t)(app_time_us_32() - hold_since) <
 		     (S3_SCAN_HOLD_MAX_MS * 1000u))) {
 		cmd.left_mm_s = S3_LINE_SPEED_MM_S;
 		cmd.right_mm_s = S3_LINE_SPEED_MM_S;
@@ -569,9 +599,9 @@ static void line_follow_drive(const LineBarcodeData_t *d, BOOL *line_is_left)
 		   every overshoot (2026-11-16 19:44 log: left/right sweeps for
 		   10 s with the centre never settling on the line). */
 		*line_is_left = FALSE;
-		if (turning) {
-			turning = FALSE;
-			exiting = TRUE;
+		if (s_lf.turning) {
+			s_lf.turning = 0U;
+			s_lf.exiting = 1U;
 			exit_since = app_time_us_32();
 		}
 		/* Soft exit: on a curve the line keeps bending, so snapping to
@@ -579,40 +609,40 @@ static void line_follow_drive(const LineBarcodeData_t *d, BOOL *line_is_left)
 		   line again on the same side (straight/steer/straight zig-zag).
 		   Keep a gentle arc the same way for S3_STEER_EXIT_MS, unless the
 		   sensor on the other side sees the line (overshot: go straight). */
-		if (exiting &&
+		if (s_lf.exiting &&
 		    ((uint32_t)(app_time_us_32() - exit_since) <
 		     (S3_STEER_EXIT_MS * 1000u)) &&
-		    !(last_go_left ? d->ir_right_raw : d->ir_left_raw)) {
-			cmd.left_mm_s = last_go_left ? S3_STEER_EXIT_INNER_MM_S
+		    !(s_lf.last_go_left ? d->ir_right_raw : d->ir_left_raw)) {
+			cmd.left_mm_s = s_lf.last_go_left ? S3_STEER_EXIT_INNER_MM_S
 						     : S3_LINE_SPEED_MM_S;
-			cmd.right_mm_s = last_go_left ? S3_LINE_SPEED_MM_S
+			cmd.right_mm_s = s_lf.last_go_left ? S3_LINE_SPEED_MM_S
 						      : S3_STEER_EXIT_INNER_MM_S;
 		} else {
-			exiting = FALSE;
+			s_lf.exiting = 0U;
 			cmd.left_mm_s = S3_LINE_SPEED_MM_S;
 			cmd.right_mm_s = S3_LINE_SPEED_MM_S;
 		}
 	} else {
-		exiting = FALSE;
+		s_lf.exiting = 0U;
 		BOOL go_left = *line_is_left;
 
 		if (d->ir_left_raw) {
 			*line_is_left = TRUE;
 			go_left = TRUE;
-			searching = FALSE;
+			s_lf.searching = 0U;
 		} else if (d->ir_right_raw) {
 			/* Centre lost and GP16 (right of the centre) sees black:
 			   the line has bent right under the barcode sensor. */
 			*line_is_left = FALSE;
 			go_left = FALSE;
-			searching = FALSE;
+			s_lf.searching = 0U;
 		} else {
 			/* Neither sensor: the side is only a guess (the line can sit
 			   in the gap between the left and centre sensors), so sweep:
 			   the guessed side first, then back past the start the other
 			   way until S3_LINE_LOST_MS. */
-			if (!searching) {
-				searching = TRUE;
+			if (!s_lf.searching) {
+				s_lf.searching = 1U;
 				search_since = app_time_us_32();
 			}
 			if ((uint32_t)(app_time_us_32() - search_since) >=
@@ -622,12 +652,12 @@ static void line_follow_drive(const LineBarcodeData_t *d, BOOL *line_is_left)
 		}
 		/* Gentle arc first; if the centre has not found the line again
 		   soon, reverse the inner wheel and spin almost on the spot, for
-		   curves tighter than the arc (~16 cm radius) and for searching
+		   curves tighter than the arc (~16 cm radius) and for s_lf.searching
 		   without driving away from the line. */
 		{
 			int16_t inner = S3_STEER_INNER_MM_S;
 
-			if (!turning || (go_left != last_go_left)) {
+			if (!s_lf.turning || (go_left != s_lf.last_go_left)) {
 				steer_since = app_time_us_32();
 			} else if ((uint32_t)(app_time_us_32() - steer_since) >=
 				   (S3_STEER_HARD_MS * 1000u)) {
@@ -636,11 +666,11 @@ static void line_follow_drive(const LineBarcodeData_t *d, BOOL *line_is_left)
 			cmd.left_mm_s = go_left ? inner : S3_STEER_SPEED_MM_S;
 			cmd.right_mm_s = go_left ? S3_STEER_SPEED_MM_S : inner;
 		}
-		turning = TRUE;
-		last_go_left = go_left;
+		s_lf.turning = 1U;
+		s_lf.last_go_left = go_left ? 1U : 0U;
 	}
 	if (d->ir_center_raw) {
-		searching = FALSE;
+		s_lf.searching = 0U;
 	}
 	(void)b2_submit_command(&cmd);
 }
@@ -776,7 +806,7 @@ static void line_follow_task(INT stacd, void *exinf)
 						state = LF_IDLE;
 						tm_printf((UB*)"[S3] junction advance refused\n");
 					}
-					s_lf_following = (state == LF_FOLLOW);
+					s_lf.following = (state == LF_FOLLOW) ? 1U : 0U;
 					(void)tk_dly_tsk(S3_FOLLOW_PERIOD_MS);
 					continue;
 				}
@@ -792,7 +822,7 @@ static void line_follow_task(INT stacd, void *exinf)
 			}
 		}
 
-		s_lf_following = (state == LF_FOLLOW);
+		s_lf.following = (state == LF_FOLLOW) ? 1U : 0U;
 		(void)tk_dly_tsk(S3_FOLLOW_PERIOD_MS);
 	}
 }
@@ -822,8 +852,8 @@ static void barcode_task(INT stacd, void *exinf)
 	while (1) {
 		process_sensors_distance_packed(0, &data);
 
-		if (data.scanned_char != '\0') {
-			char ch = data.scanned_char;
+		if (data.scanned_code != S3_CODE_NONE) {
+			char ch = s3_code_to_char(data.scanned_code);
 
 			/* TMO_POL: never block here; drop the char if the
 			   buffer is full rather than miss the next edges. */

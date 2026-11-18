@@ -22,7 +22,22 @@
 #define B2_CAL_WHEEL_TRACK_MM           (120U)
 #endif
 
-static b2_config_t s2_config;
+/* CR1 (R9): calibration is constant, so it lives in flash. b2_init keeps a
+   pointer to it instead of a RAM copy. */
+static const b2_config_t s2_config = {
+    .ticks_per_wheel_rev = B2_CAL_TICKS_PER_WHEEL_REV,
+    .wheel_circumference_mm = B2_CAL_WHEEL_CIRCUMFERENCE_MM,
+    .wheel_track_mm = B2_CAL_WHEEL_TRACK_MM,
+    /* Also the feedforward scale: ff = max_pwm * request / max_speed.  At 150
+       a 100 mm/s request started at ~225 mm/s (2026-11-13 telemetry, timer
+       fixed), so steering pivots overshot the line.  300 halves it. */
+    .max_speed_mm_s = 300U,
+    .max_pwm_permil = 650U,
+    .encoder_stall_ms = 500U,
+    .pwm_frequency_hz = 20000U,
+    .kp_q8 = 128U,
+    .ki_q8 = 8U
+};
 static ID s2_task_id;
 static volatile BOOL s2_hw_ready = FALSE;
 
@@ -54,19 +69,7 @@ static void subsystem2_task(INT stacd, void *exinf)
 
 EXPORT ER subsystem2_init(void)
 {
-    s2_config.ticks_per_wheel_rev = B2_CAL_TICKS_PER_WHEEL_REV;
-    s2_config.wheel_circumference_mm = B2_CAL_WHEEL_CIRCUMFERENCE_MM;
-    s2_config.wheel_track_mm = B2_CAL_WHEEL_TRACK_MM;
-    /* Also the feedforward scale: ff = max_pwm * request / max_speed.  At 150
-       a 100 mm/s request started at ~225 mm/s (2026-11-13 telemetry, timer
-       fixed), so steering pivots overshot the line.  300 halves it. */
-    s2_config.max_speed_mm_s = 300U;
-    s2_config.max_pwm_permil = 650U;
-    s2_config.encoder_stall_ms = 500U;
-    s2_config.pwm_frequency_hz = 20000U;
-    s2_config.kp_q8 = 128U;
-    s2_config.ki_q8 = 8U;
-    return E_OK;
+    return E_OK;    /* CR1: s2_config is a const initialiser now */
 }
 
 EXPORT ER subsystem2_start(void)

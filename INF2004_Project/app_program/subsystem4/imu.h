@@ -35,17 +35,25 @@ typedef struct
                                       must be above the steepest hump. */
     uint8_t overturn_tilt_deg;     /* PROVISIONAL: on its side or roof. */
     uint16_t wheel_track_mm;       /* = S2's B2_CAL_WHEEL_TRACK_MM. */
+    uint16_t wheelbase_mm;         /* front-to-rear ground contacts (hump
+                                      height = wheelbase x sin(peak tilt)). */
     uint8_t forward_axis_sign;     /* 1 normal, 0 invert. Physical calibration. */
     uint8_t forward_axis_is_y;     /* 0: chip X points forward, 1: chip Y does
                                       (GY-511 header mounted across the car). */
     uint8_t calibration_samples;   /* 20..100 samples, robot stationary. */
 } b4_config_t;
+/* CR1: fault bitmask, bit (f - 1) for each b4_fault_t f != NONE. */
+#define B4_FAULT_BIT(f)  ((uint8_t)(1U << ((uint32_t)(f) - 1U)))
+
+/* CR1: 56 -> 32 bytes.
+ * The packed control fields at the end share storage and are also written
+ * by b4_authorized_reset_while_stopped() on another task, so EVERY write to
+ * them holds s_lock (imu.c). Values updated on every 100 Hz sample outside
+ * the lock stay separate plain fields (no shared read-modify-write). */
 typedef struct
 {
-    b4_state_t state;
-    b4_fault_t fault;
-    uint8_t calibration_progress;
-    uint8_t calibration_ready;
+    uint32_t last_sample_us;       /* 32-bit us, wraps every 71.6 min. */
+    uint16_t i2c_errors;           /* saturates. */
     int16_t acceleration_x_mg;
     int16_t acceleration_y_mg;
     int16_t acceleration_z_mg;
@@ -57,25 +65,37 @@ typedef struct
     uint16_t peak_tilt_cdeg;
     int16_t recent_up_speed_mm_s;  /* highest upward speed in the last 0.3 s
                                       (for 5 Hz telemetry), + = up. */
-    uint16_t max_hump_height_mm;   /* rough calibrated estimate. */
-    uint16_t last_hump_height_mm;
-    uint16_t current_peak_mm;
-    uint16_t hump_count;           /* +1 per completed hump. */
-    b4_terrain_phase_t terrain_phase;
-    uint8_t lift_latched;          /* motors braked until authorised reset. */
-    b4_lift_cause_t lift_cause;
     int16_t yaw_rate_dps;          /* from wheel speeds; + = turning left. */
-    b4_motion_t motion;            /* debounced motion class. */
-    uint32_t i2c_errors;
-    uint32_t calibration_restarts; /* robot moved while calibrating. */
-    uint64_t last_sample_us;
+    uint8_t max_hump_height_mm;    /* rough calibrated estimate, 0..255. */
+    uint8_t last_hump_height_mm;
+    uint8_t current_peak_mm;
+    uint8_t hump_count;            /* +1 per completed hump, wraps. */
+    uint8_t calibration_progress;  /* 0..calibration_samples (<= 100) */
+    uint8_t calibration_restarts;  /* robot moved while calibrating; saturates. */
+    /* packed control fields: write only while holding s_lock */
+    uint8_t state : 2;             /* b4_state_t, 4 values */
+    uint8_t fault_mask : 3;        /* B4_FAULT_BIT() per active fault */
+    uint8_t lift_latched : 1;      /* motors braked until authorised reset. */
+    uint8_t lift_cause : 2;        /* b4_lift_cause_t, 3 values */
+    uint8_t motion : 3;            /* b4_motion_t, 7 values (debounced). */
+    uint8_t calibration_ready : 1;
+    uint8_t terrain_phase : 2;     /* b4_terrain_phase_t, 4 values */
+    uint8_t : 2;
 } b4_status_t;
+/* CR1: 12 -> 8 bytes. Field ORDER unchanged: imu.c builds events with
+ * positional initialisers. */
 typedef struct
 {
-    b4_event_type_t type;
-    uint16_t height_mm;            /* HUMP_COMPLETE */
-    b4_lift_cause_t cause;         /* LIFTED */
-    b4_fault_t fault;              /* SENSOR_FAULT */
+    uint8_t type : 2;              /* b4_event_type_t, 3 values */
+    uint8_t : 6;
+    uint8_t height_mm;             /* HUMP_COMPLETE, 0..255 */
+    int16_t max_pitch_cdeg;        /* HUMP_COMPLETE: peak nose-up */
+    int16_t min_pitch_cdeg;        /* HUMP_COMPLETE: peak nose-down */
+    uint16_t peak_gap_mm : 10;     /* HUMP_COMPLETE: travel between the two
+                                      peaks (<= 700), about the wheelbase */
+    uint16_t cause : 2;            /* LIFTED: b4_lift_cause_t */
+    uint16_t fault : 3;            /* SENSOR_FAULT: b4_fault_t */
+    uint16_t : 1;
 } b4_event_t;
 typedef bool (*b4_event_publish_fn)(const b4_event_t *ev, void *ctx);
 /* This is an urgent NOTIFICATION to VehicleController, not motor GPIO access. */

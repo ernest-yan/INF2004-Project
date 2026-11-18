@@ -44,9 +44,9 @@ LOCAL BOOL		g_remote_estop;	/* remote E-STOP latched until RESET */
 
 /* Rising-edge counters for the telemetry EVENT frames. */
 LOCAL BOOL	g_prev_lift;
-LOCAL UH	g_lift_count;
+LOCAL UB	g_lift_count;		/* CR1: 8-bit, wraps (event trigger) */
 LOCAL BOOL	g_prev_scan;
-LOCAL UH	g_profile_count;
+LOCAL UB	g_profile_count;
 
 LOCAL uint16_t clamp_u16(int32_t v)
 {
@@ -59,6 +59,51 @@ LOCAL uint16_t clamp_u16(int32_t v)
 LOCAL uint8_t clamp_u8(uint32_t v)
 {
 	return (uint8_t)((v > 0xFFu)? 0xFFu: v);
+}
+
+/* CR1: a value into an n-bit unsigned field, saturating (never wraps). */
+LOCAL uint32_t clamp_bits(uint32_t v, uint32_t bits)
+{
+	const uint32_t max = (1u << bits) - 1u;
+	return (v > max)? max: v;
+}
+
+/* CR1: the system fault bitmask (team_interfaces.h), built from each
+ * subsystem's own fault bitmask. Bit positions follow b2/b4/subsystem5
+ * FAULT_BIT(): fault enum value f is bit (f - 1) in its subsystem's mask. */
+LOCAL uint16_t build_fault_mask(const b2_status_t *p_m,
+				const LineBarcodeData_t *p_l,
+				const b4_status_t *p_i,
+				const subsystem5_status_t *p_u)
+{
+	uint16_t f = 0u;
+
+	f |= (uint16_t)((uint16_t)p_m->fault_mask << 0) & SYS_FLT_S2_ALL;
+	if (p_l->fault_mask != 0u) {
+		f |= SYS_FLT_LINE_LOSS;
+	}
+	f |= (uint16_t)((uint16_t)p_i->fault_mask << 5) & SYS_FLT_S4_ALL;
+	f |= (uint16_t)((uint16_t)p_u->fault_mask << 8) & SYS_FLT_S5_ALL;
+#if TM_MQTT
+	if (!s1_is_online()) {
+		f |= SYS_FLT_WIFI_LOSS;
+	}
+#endif
+	return f;
+}
+
+uint16_t system_fault_mask(void)
+{
+	b2_status_t		m;
+	b4_status_t		i;
+	subsystem5_status_t	u;
+	LineBarcodeData_t	l;
+
+	b2_get_status(&m);
+	b4_get_status(&i);
+	subsystem5_get_status(&u);
+	l = get_line_barcode_data_safe();
+	return build_fault_mask(&m, &l, &i, &u);
 }
 
 /* ---- remote commands (from our telemetry task, never the WiFi task) ---- */
@@ -138,7 +183,7 @@ bool safety_reset_while_stopped(void)
 		tm_printf((UB*)"[S1] RESET refused: wheels still moving\n");
 		return false;
 	}
-	if (i.lift_latched || (i.fault != B4_FAULT_NONE)) {
+	if (i.lift_latched || (i.fault_mask != 0u)) {
 		/* S4 recalibrates next: the car must be back on the ground
 		   and still for ~0.5 s. */
 		(void)b4_authorized_reset_while_stopped();
@@ -148,7 +193,7 @@ bool safety_reset_while_stopped(void)
 	}
 	g_remote_estop = FALSE;
 	tm_printf((UB*)"[S1] RESET done (brake %d, lift %d, S5 fault %d), send START to drive\n",
-		  (int)m.brake_latched, (int)i.lift_latched, (int)u.fault);
+		  (int)m.brake_latched, (int)i.lift_latched, (int)u.fault_mask);
 	return true;
 }
 
@@ -168,6 +213,7 @@ void vehicle_get_status(vehicle_status_t *p_out)
 	subsystem5_status_t	u;
 	LineBarcodeData_t	l;
 	uint8_t			faults = 0u;
+	uint16_t		sys;
 
 	b2_get_status(&m);
 	b4_get_status(&i);
@@ -201,16 +247,17 @@ void vehicle_get_status(vehicle_status_t *p_out)
 						   (uint8_t)EVT_SRC_IMU:
 						   (uint8_t)EVT_SRC_MOTION;
 
-	if ((m.fault != B2_FAULT_NONE) || (m.state == B2_FAULT)) {
+	/* CR1: the MQTT byte (bit n = subsystem n) comes from the system mask.
+	   Line loss is not a fault (see line), and S3 has no other fault, so
+	   TLM_FAULT_S3 stays clear as before. */
+	sys = build_fault_mask(&m, &l, &i, &u);
+	if (((sys & SYS_FLT_S2_ALL) != 0u) || (m.state == B2_FAULT)) {
 		faults |= TLM_FAULT_S2;
 	}
-	if ((l.fault_mask & (uint8_t)~FAULT_LINE_LOSS) != 0u) {
-		faults |= TLM_FAULT_S3;	/* line loss is not a fault: see line */
-	}
-	if (i.fault != B4_FAULT_NONE) {
+	if ((sys & SYS_FLT_S4_ALL) != 0u) {
 		faults |= TLM_FAULT_S4;
 	}
-	if (u.fault != subsystem5_FAULT_NONE) {
+	if ((sys & SYS_FLT_S5_ALL) != 0u) {
 		faults |= TLM_FAULT_S5;
 	}
 	p_out->fault_mask = faults;
@@ -224,11 +271,12 @@ void motion_get_status(motion_status_t *p_out)
 	b2_get_status(&s);
 	mean_mm = (s.left_total_mm + s.right_total_mm) / 2;
 
-	p_out->speed_l_mm_s = clamp_u16(s.left_speed_mm_s);
-	p_out->speed_r_mm_s = clamp_u16(s.right_speed_mm_s);
-	p_out->enc_l        = s.left_encoder_edges;
-	p_out->enc_r        = s.right_encoder_edges;
-	p_out->distance_mm  = (mean_mm > 0)? (uint32_t)mean_mm: 0u;
+	p_out->speed_l_mm_s = clamp_bits(clamp_u16(b2_speed_value(s.left_speed_ob)), 10u);
+	p_out->speed_r_mm_s = clamp_bits(clamp_u16(b2_speed_value(s.right_speed_ob)), 10u);
+	p_out->enc_l        = (uint16_t)(s.left_encoder_edges & 0xFFFFu);	/* wraps */
+	p_out->enc_r        = (uint16_t)(s.right_encoder_edges & 0xFFFFu);
+	p_out->distance_cm  = clamp_bits((mean_mm > 0)?
+					 ((uint32_t)mean_mm / MM_PER_CM): 0u, 12u);
 }
 
 /* A decoded letter -> what it means under the current mapping (S3's). */
@@ -256,7 +304,7 @@ void line_get_status(line_status_t *p_out)
 	/* S3's counter (not scanned_char, which lasts one poll, and not
 	 * mbf_barcode, which belongs to line_follow_task). */
 	p_out->barcode_count = d.barcode_count;
-	p_out->last_barcode  = barcode_cmd(d.last_char);
+	p_out->last_barcode  = barcode_cmd(s3_code_to_char(d.last_code));
 }
 
 void imu_get_status(imu_status_t *p_out)
@@ -286,8 +334,8 @@ void imu_get_status(imu_status_t *p_out)
 	p_out->lift_cause   = (uint8_t)s.lift_cause;
 	p_out->yaw_dps      = s.yaw_rate_dps;
 	p_out->motion       = (uint8_t)s.motion;
-	p_out->up_speed_mm_s = (s.recent_up_speed_mm_s > 0)?
-			       (uint16_t)s.recent_up_speed_mm_s: 0u;
+	p_out->up_speed_mm_s = clamp_bits((s.recent_up_speed_mm_s > 0)?
+				(uint32_t)s.recent_up_speed_mm_s: 0u, 10u);
 	p_out->tilt_deg     = clamp_u8((uint32_t)s.tilt_cdeg / CDEG_PER_DEG);
 }
 
@@ -298,21 +346,21 @@ void ultra_get_status(ultra_status_t *p_out)
 
 	subsystem5_get_status(&s);
 
-	/* One OBSTACLE event per finished scan. */
-	if (s.scan_complete && !g_prev_scan) {
-		g_profile_count++;
-	}
-	g_prev_scan = (s.scan_complete != 0u);
+	/* One OBSTACLE event per measured profile (S5 counts them, so a
+	   profile is reported even when no safe side follows). */
+	(void)g_prev_scan;
+	g_profile_count = s.profile_count;
 
 	p_out->obstacle_state = (uint8_t)s.state;
-	p_out->nearest_cm     = s.front_valid? (uint16_t)(s.front_mm / MM_PER_CM):
-					       (uint16_t)NO_ECHO_CM;
+	p_out->fault          = subsystem5_first_fault(s.fault_mask);
+	p_out->nearest_cm     = s.front_valid? clamp_bits(s.front_mm / MM_PER_CM, 9u):
+					       NO_ECHO_CM;
 	p_out->profile_count  = g_profile_count;
 	p_out->centre_deg     = clamp_u8(p->closest_angle_deg);
 	p_out->width_cm       = clamp_u8(p->approximate_width_mm / MM_PER_CM);
 	p_out->clear_l_cm     = p->left_clearance_valid?
-				(uint16_t)(p->left_clearance_mm / MM_PER_CM): 0u;
+				clamp_bits(p->left_clearance_mm / MM_PER_CM, 9u): 0u;
 	p_out->clear_r_cm     = p->right_clearance_valid?
-				(uint16_t)(p->right_clearance_mm / MM_PER_CM): 0u;
+				clamp_bits(p->right_clearance_mm / MM_PER_CM, 9u): 0u;
 	p_out->decision       = (uint8_t)p->candidate_side;
 }

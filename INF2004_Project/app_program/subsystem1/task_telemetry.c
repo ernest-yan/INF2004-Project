@@ -145,7 +145,7 @@ LOCAL void send_status(UH session)
 	imu_get_status(&i);
 	ultra_get_status(&u);
 
-	dist_cm = m.distance_mm / 10u;
+	dist_cm = m.distance_cm;
 	s.session         = session;
 	s.seq             = g_seq_status++;
 	s.vehicle_state   = v.state;
@@ -166,6 +166,7 @@ LOCAL void send_status(UH session)
 	s.motion          = i.motion;
 	s.up_speed_mm_s   = i.up_speed_mm_s;
 	s.tilt_deg        = i.tilt_deg;
+	s.s5_fault        = u.fault;
 
 #if TLM_USE_JSON_STATUS
 	{
