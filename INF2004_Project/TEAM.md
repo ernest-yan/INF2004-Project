@@ -175,7 +175,7 @@ sends to it or waits on it. Agree on the data format before coding.
 | IF-07 | S5 → S3 | function call | — | `subsystem5_get_status()`: S3 only drives while S5 is in MONITOR with no stop request | |
 | IF-08 | S3 → S5 | function call | — | `get_line_barcode_data_safe()`: the bypass looks for the line on its way back | |
 | IF-09 | S2 → S1 | function call | — | `b2_get_status()`: read-only, 5 Hz, from `s1_telemetry_task` only | |
-| IF-10 | S3 → S1 | function call | — | `get_line_barcode_data_safe()`: read-only, 5 Hz, from `s1_telemetry_task` only (takes S3's mutex, so never from the WiFi task). Barcodes via the `barcode_count` / `last_code` fields (6-bit letter code, read with `s3_code_to_char()`, CR1) (S1 never reads `mbf_barcode`). **New fields: awaiting Buddy 3's review** | |
+| IF-10 | S3 → S1 | function call | — | `get_line_barcode_data_safe()`: read-only, 5 Hz, from `s1_telemetry_task` only (takes S3's mutex, so never from the WiFi task). Barcodes via the `barcode_count` / `last_code` fields (6-bit letter code, read with `s3_code_to_char()`, CR1) (S1 never reads `mbf_barcode`). **Agreed 2026-11-19** | |
 | IF-11 | S4 → S1 | function call | — | `b4_get_status()`: read-only, 5 Hz, from `s1_telemetry_task` only | |
 | IF-12 | S5 → S1 | function call | — | `subsystem5_get_status()`: read-only, 5 Hz, from `s1_telemetry_task` only. S1 never reads `mbf_s5_events` (IF-02 belongs to the VC) | |
 | IF-13 | S1 (WiFi task) → S1 (telemetry task) | message buffer (owned by S1) + `tk_wup_tsk` | `s1_mbf_cmd` | one `S1_CMD` per accepted remote command (START / STOP / E-STOP / RESET / MAP), max 4 queued; carried out by `s1_telemetry_task` (IF-15 to IF-18) | |
