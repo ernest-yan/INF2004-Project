@@ -305,6 +305,8 @@ void line_get_status(line_status_t *p_out)
 	 * mbf_barcode, which belongs to line_follow_task). */
 	p_out->barcode_count = d.barcode_count;
 	p_out->last_barcode  = barcode_cmd(s3_code_to_char(d.last_code));
+	p_out->letter_code   = d.last_code;
+	p_out->scan_fail_count = d.scan_fail_count;
 }
 
 void imu_get_status(imu_status_t *p_out)

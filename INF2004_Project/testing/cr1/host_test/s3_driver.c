@@ -91,6 +91,8 @@ static uint32_t rnd(uint32_t n)
 }
 
 static char g_last_decoded;
+static unsigned g_fail_events;      /* CR1 build: scan_fail_count changes */
+static unsigned g_prev_fail;
 static void step_until(uint32_t t_us)
 {
     while (g_now_us < t_us)
@@ -101,6 +103,11 @@ static void step_until(uint32_t t_us)
         process_sensors_distance_packed(0U, &d);
 #ifdef S3_CODE_NONE
         if (d.scanned_code != S3_CODE_NONE) { g_last_decoded = s3_code_to_char(d.scanned_code); }
+        if (d.scan_fail_count != g_prev_fail)
+        {
+            g_fail_events += (d.scan_fail_count - g_prev_fail) & 3U;
+            g_prev_fail = d.scan_fail_count;
+        }
 #else
         if (d.scanned_char != '\0') { g_last_decoded = d.scanned_char; }
 #endif
@@ -178,5 +185,6 @@ int main(void)
         }
         printf(" nul=%d\n", (int)get_action_for_character('\0'));
     }
+    fprintf(stderr, "failed-scan events: %u\n", g_fail_events);
     return 0;
 }

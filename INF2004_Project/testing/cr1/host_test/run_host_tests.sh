@@ -11,7 +11,7 @@ trap 'rm -rf "$OUT"' EXIT
 CC="gcc -std=gnu11 -Wall -Wextra -O2"
 fail=0
 
-echo "== S1 telemetry codec (unchanged wire format) =="
+echo "== S1 telemetry codec (wire format; only BARCODE events gained the letter) =="
 $CC -I"$PROJ/app_program/subsystem1" "$PROJ/app_program/subsystem1/tlm_codec.c" \
     "$PROJ/testing/subsystem1/host_test/test_tlm_codec.c" -o "$OUT/codec" && "$OUT/codec" | tail -1 || fail=1
 
@@ -40,13 +40,20 @@ git -C "$(git -C "$PROJ" rev-parse --show-toplevel)" archive --prefix=INF2004_Pr
 S3CC="gcc -std=gnu11 -O2 -w"
 $S3CC -I"$OUT/oldtree/INF2004_Project/app_program/subsystem3" "$HERE/s3_driver.c" -o "$OUT/s3_old"
 $S3CC -I"$PROJ/app_program/subsystem3" "$HERE/s3_driver.c" -o "$OUT/s3_new"
-"$OUT/s3_old" > "$OUT/s3_old.txt"
-"$OUT/s3_new" > "$OUT/s3_new.txt"
+"$OUT/s3_old" > "$OUT/s3_old.txt" 2>/dev/null
+"$OUT/s3_new" > "$OUT/s3_new.txt" 2> "$OUT/s3_new_err.txt"
 scans=$(grep -c '^scan' "$OUT/s3_new.txt")
 decoded=$(grep '^scan' "$OUT/s3_new.txt" | grep -vc -- '-> -$' || true)
 right=$(grep '^scan' "$OUT/s3_new.txt" | awk '{if ($3 == $NF) n++} END {print n+0}')
 if diff "$OUT/s3_old.txt" "$OUT/s3_new.txt" > "$OUT/s3_diff.txt"; then
     echo "S3: $scans simulated scans, old and new decoders give IDENTICAL results ($decoded decoded, $right correct letter); maps identical"
+    undecoded=$(grep '^scan' "$OUT/s3_new.txt" | grep -c -- '-> -$' || true)
+    seen=$(sed -n 's/failed-scan events: //p' "$OUT/s3_new_err.txt")
+    if [ "$seen" = "$undecoded" ]; then
+        echo "S3: every undecoded scan reported as 'seen, not decoded' ($seen of $undecoded)"
+    else
+        echo "S3: 'seen, not decoded' count $seen != undecoded scans $undecoded"; fail=1
+    fi
 else
     echo "S3: old and new decoders DIFFER:"; head -20 "$OUT/s3_diff.txt"; fail=1
 fi
@@ -65,5 +72,10 @@ if diff "$OUT/s4_old.txt" "$OUT/s4_new.txt" > "$OUT/s4_diff.txt" &&
 else
     echo "S4: old and new DIFFER or lock error:"; head -20 "$OUT/s4_diff.txt"; tail -1 "$OUT/s4_new.txt"; fail=1
 fi
+
+echo "== BARCODE event: codec -> dashboard.py =="
+$CC -I"$PROJ/app_program/subsystem1" "$PROJ/app_program/subsystem1/tlm_codec.c" \
+    "$HERE/barcode_event_enc.c" -o "$OUT/bce" && "$OUT/bce" > "$OUT/frames.txt"
+python3 -I "$HERE/test_barcode_event.py" "$PROJ/testing/subsystem1/tools/dashboard.py" < "$OUT/frames.txt" || fail=1
 
 [ $fail -eq 0 ] && echo "ALL CR1 HOST TESTS PASSED" || { echo "CR1 HOST TESTS FAILED"; exit 1; }

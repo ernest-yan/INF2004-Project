@@ -244,6 +244,10 @@ tlm_encode_event(const tlm_event_t *p_e, uint8_t *p_buf, uint32_t cap)
             break;
 
         case TLM_EVT_BARCODE:
+            bw_put_sat(&w, p_e->a, 3u);     /* action, barcode_cmd_t */
+            bw_put_sat(&w, p_e->b, 6u);     /* letter: 0 none, 1-26 A-Z, 27-36 0-9 */
+            break;
+
         case TLM_EVT_ESTOP:
             bw_put_sat(&w, p_e->a, 3u);
             break;

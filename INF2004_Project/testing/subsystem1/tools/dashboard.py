@@ -15,9 +15,10 @@ obstacle, link health, the last ACK and event, and plain-language warnings
 are typed at the bottom as before. --no-panel gives the old scrolling output.
 Needs a window at least 21 rows tall; otherwise it falls back automatically.
 
-Barcode letters: the car only reports the action (LEFT, U-TURN...), so the
-dashboard looks the letter up in the map the car ACCEPTED. Type 'help' in
-the dashboard for the details and limits (also in BARCODE_HELP below).
+Barcode letters: the car reports the action (LEFT, U-TURN...) AND the letter
+it decoded, plus "seen, not decoded" when a barcode passed the sensor but no
+letter came out. Older firmware sent only the action; for that, the
+dashboard looks the letter up in the map the car ACCEPTED (see 'help').
 
 Keep the field tables below in sync with app_program/subsystem1/tlm_codec.c
 and app_program/subsystem1/MQTT_PROTOCOL.md.
@@ -74,8 +75,11 @@ SPEED_MAX, OBS_CM_MAX = (1 << 10) - 1, (1 << 9) - 1           # field saturation
 # Printed at start-up (short form) and by the 'help' command (full form).
 BARCODE_HELP = """\
 Barcode letters
-  The car only reports the action (LEFT, U-TURN, ...). The dashboard looks the
-  letter up in the map the car ACCEPTED ('map FULR' = forward, U-turn, left, right).
+  The car reports the action AND the decoded letter ('A' -> LEFT), also for a
+  letter that is not in the map, and "SEEN, not decoded" when a barcode passed
+  the sensor without giving a letter.
+  Older firmware sent only the action. Then the dashboard looks the letter up
+  in the map the car ACCEPTED ('map FULR' = forward, U-turn, left, right):
     Barcode row : 'F' LEFT instead of just LEFT, plus the map in use
     Event row   : BARCODE 'F' -> LEFT each time a barcode is read
     CSV log     : each BARCODE event gets "letter": "F" and "letter_from": "map"
@@ -105,6 +109,15 @@ HEARTBEAT_FIELDS = [("uptime_s", 16), ("rssi_neg", 7), ("link", 3), ("cmds_ok", 
 ACK_FIELDS = [("cmd_seq", 16), ("cmd", 4), ("result", 4)]
 OBSTACLE_FIELDS = [("nearest_cm", 9), ("centre_deg", 8), ("width_cm", 8),
                    ("clear_l_cm", 9), ("clear_r_cm", 9), ("decision", 3)]
+
+
+def letter_from_code(code: int):
+    """6-bit letter code (S3_CODE in line_barcode.h) -> 'A'..'Z' / '0'..'9'."""
+    if 1 <= code <= 26:
+        return chr(ord("A") + code - 1)
+    if 27 <= code <= 36:
+        return chr(ord("0") + code - 27)
+    return None
 
 
 def describe_map(letters: str) -> str:
@@ -179,11 +192,15 @@ def decode_event(data: bytes) -> dict:
         d["from"], d["to"] = VEH_STATE[r.get(3)], VEH_STATE[r.get(3)]
     elif etype in (2, 6):
         d["value"] = r.get(3)
-        # BARCODE: newer firmware adds the decoded letter (8-bit ASCII).
-        if etype == 2 and r.remaining() >= 8:
-            c = r.get(8)
-            if 32 < c < 127:
-                d["letter"] = chr(c)
+        # BARCODE: CR1 firmware adds the decoded letter as a 6-bit code
+        # (0 none, 1-26 A-Z, 27-36 0-9). Older 5-byte events have only 5
+        # padding bits left, so they never look like a letter.
+        if etype == 2 and r.remaining() >= 6:
+            letter = letter_from_code(r.get(6))
+            if letter:
+                d["letter"] = letter
+            elif d["value"] == 0:
+                d["seen_not_decoded"] = True    # scan seen, no letter
     elif etype == 3:
         d["height_mm"] = r.get(8)
     elif etype == 4:
@@ -466,7 +483,8 @@ class Panel:
         if letter and bc and bc != BC_INVALID:
             bc_txt = f"'{letter}' {bc_txt}"
         elif bc == BC_INVALID:
-            bc_txt = "INVALID (not in map)"
+            bc_txt = (f"'{self.last_letter}' INVALID (not in map)" if self.last_letter
+                      else "INVALID (not in map)")
         if self.map_letters:
             map_seg = [("map ", DIM), (f"{self.map_letters:<6}", GREEN)]
         elif self.lost_map:
@@ -501,6 +519,8 @@ class Panel:
             v = info.get("value")
             if d["type"] == "ESTOP" and v is not None:
                 info = f" by {EVT_SRC[v] if v < len(EVT_SRC) else v}"
+            elif d["type"] == "BARCODE" and d.get("seen_not_decoded"):
+                info = " SEEN, not decoded (no letter)"
             elif d["type"] == "BARCODE" and v is not None:
                 info = f" {BARCODE[v] if v < len(BARCODE) else v}"
                 if "letter" in d:
@@ -706,7 +726,9 @@ class Dashboard:
                 d = decode_event(msg.payload)
                 v = d.get("value")
                 note = ""
-                if d["type"] == "BARCODE" and "letter" not in d:
+                if d["type"] == "BARCODE" and d.get("seen_not_decoded"):
+                    note = "  (a barcode passed the sensor but no letter was decoded)"
+                elif d["type"] == "BARCODE" and "letter" not in d:
                     if self.map_letters and v in MAP_POS:
                         d["letter"] = self.map_letters[MAP_POS[v]]   # from the map
                         d["letter_from"] = "map"

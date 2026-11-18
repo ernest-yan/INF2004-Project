@@ -67,7 +67,7 @@ Kernel memory also shrinks. The S5 event queue is sized from `sizeof(subsystem5_
 | `b4_status_t` | S4 → S1, VC, S3 | 56 | **32** |
 | `subsystem5_status_t` | S5 → S1, VC, S3 | 38 | **20** |
 | `LineBarcodeData_t` | S3 → S1, VC | 6 | **4** |
-| `vehicle_status_t` / `motion_status_t` / `line_status_t` / `imu_status_t` / `ultra_status_t` | team getters → S1 | 4 / 16 / 4 / 18 / 14 | **2 / 8 / 2 / 10 / 8** |
+| `vehicle_status_t` / `motion_status_t` / `line_status_t` / `imu_status_t` / `ultra_status_t` | team getters → S1 | 4 / 16 / 4 / 18 / 14 | **2 / 8 / 3 / 10 / 8** (line: 2 B packed + 1 B for the barcode letter, added 19 Nov) |
 | `S1_STATS` | Wi-Fi task → telemetry task | 20 | **8** |
 | `S1_CMD` | Wi-Fi task → telemetry task | 12 | 12 (see table, "left as is") |
 | `vehicle_event_t` | `qVehicleEvent` | 8 | 8 (already minimal once aligned) |
@@ -82,6 +82,7 @@ Every frame is bit-packed, most-significant bit first ([tlm_codec.h](../../app_p
 | Status (5 Hz) | 166 | **21** | 257 B typical, 276 B worst case |
 | Heartbeat (1 Hz) | 86 | 11 | – |
 | Event (max) | 78 | 10 | – |
+| BARCODE event | 35 → 41 | 5 → 6 | – (19 Nov: now also carries the decoded letter as a 6-bit code, and reports "seen, not decoded" scans) |
 | ACK | 52 | 7 | – |
 | Command / `map` command | 40 / 72 | 5 / 9 | – |
 
@@ -100,9 +101,10 @@ The script rebuilds the pre-CR1 code from tag `pre-cr1` automatically, so each o
 | Subsystem | Test | Result |
 |---|---|---|
 | S1 | Existing codec test (wire format unchanged) | PASS |
-| S1 | [test_s1_adapters.c](host_test/test_s1_adapters.c): real `team_adapters.c`. Every fault sets exactly its own system-mask bit, the MQTT fault byte follows the pre-CR1 rules, values saturate at their field width instead of wrapping, and barcode letters map to the right movement | 102/102 checks |
+| S1 | [test_s1_adapters.c](host_test/test_s1_adapters.c): real `team_adapters.c`. Every fault sets exactly its own system-mask bit, the MQTT fault byte follows the pre-CR1 rules, values saturate at their field width instead of wrapping, barcode letters map to the right movement, and the letter and "seen, not decoded" count reach S1 | 109/109 checks |
 | S2 | [test_s2_motion.c](host_test/test_s2_motion.c): real `motion.c` with a simulated clock and encoder ISR. Covers packing at every range edge, refusing out-of-range requests (never truncating), MOVE goal distance and speed, the 32-bit clock wrapping mid-run, stall fault and reset, emergency brake latch, odometry saturation, and every lock released | 1,093/1,093 checks |
-| S3 | [s3_driver.c](host_test/s3_driver.c): old vs new `line_barcode.c` on 3,000 simulated Code 39 scans (random letter, speed, narrow:wide ratio, ±25 % jitter, both directions, damaged scans), plus the barcode map | **Identical**: 2,927 decoded, all correct, none wrong |
+| S3 | [s3_driver.c](host_test/s3_driver.c): old vs new `line_barcode.c` on 3,000 simulated Code 39 scans (random letter, speed, narrow:wide ratio, ±25 % jitter, both directions, damaged scans), plus the barcode map | **Identical**: 2,927 decoded, all correct, none wrong. All 73 undecoded scans reported as "seen, not decoded" |
+| S1 + dashboard | [barcode_event_enc.c](host_test/barcode_event_enc.c) + [test_barcode_event.py](host_test/test_barcode_event.py): every letter A–Z, 0–9, plus "seen, not decoded" and INVALID, encoded by the C codec and decoded by the real `dashboard.py`; old 5-byte events still decode | 82/82 checks |
 | S4 | [s4_driver.c](host_test/s4_driver.c): old vs new `imu.c`/`terrain.c`/`posture.c` on 12 simulated runs: calibrate, drive, hump, turn, **lifted → motors stopped**, reset, **overturned → motors stopped**, I2C fault | **Identical**: 2,074 status/event lines, 12 humps, 24 lift/overturn stops, locks balanced |
 | S5 | [test_s5_profile.c](host_test/test_s5_profile.c): old vs new `profile.c` on 200,000 random scans | **Identical**: 0 mismatches over 16 fields |
 

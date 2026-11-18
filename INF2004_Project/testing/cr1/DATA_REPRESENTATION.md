@@ -297,4 +297,7 @@ Packing must not drop or narrow any data the specification asks for.
 | S5 small counters | unchanged | unchanged | As planned. |
 | System fault bitmask | `uint16_t app_fault_mask` with set/clear under a lock | `system_fault_mask()` builds the same 16 bits on demand from each subsystem's fault bitmask | No second copy of the faults to keep in step, and no writer, so no lock. The bit layout is the table above (`SYS_FLT_*` in `team_interfaces.h`). |
 | `vehicle_event_t` | 8 B | 8 B | 53 bits of data; 8 B once aligned. |
+| BARCODE event (MQTT), added 19 Nov | action only (3 bits) | action 3 bits + **letter 6 bits** (0 none, 1–26 A–Z, 27–36 0–9); action NONE + letter 0 = "barcode seen, not decoded". Frame 5 → 6 B | Rubric #1/#2: the decoded letter (and a failed read) must be visible on telemetry; before, an unmapped letter showed only as INVALID. The only MQTT layout change; `dashboard.py` updated, old 5-byte frames still decode. |
+| `LineBarcodeData_t.scan_fail_count`, added 19 Nov | – | 2 bits in the existing spare bits (struct stays 4 B) | Counts barcode-sized scans that gave no letter. Scans end ≥ 400 ms apart and S1 reads every 200 ms, so a 2-bit wrapping counter cannot miss one. |
+| `line_status_t`, added 19 Nov | 2 B | 3 B | + letter (6 bits) + failed-scan count (2 bits). |
 
