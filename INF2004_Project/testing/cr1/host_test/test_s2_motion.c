@@ -84,15 +84,35 @@ static int g_checks;
     } while (0)
 
 static const b2_config_t k_cfg = {
-    .ticks_per_wheel_rev = 930U, .wheel_circumference_mm = 210U,
+    .ticks_per_rev_left = 930U, .ticks_per_rev_right = 930U,
+    .wheel_circumference_mm = 210U,
     .wheel_track_mm = 120U, .max_speed_mm_s = 300U, .max_pwm_permil = 650U,
     .encoder_stall_ms = 500U, .pwm_frequency_hz = 20000U,
-    .kp_q8 = 128U, .ki_q8 = 8U
+    .kp_q8 = 128U, .ki_q8 = 8U,
+    .kd_q8 = 0U, .straight_kp_q8 = 0U, .straight_trim_max_mm_s = 20U
 };
 
-/* Encoder simulation: each wheel produces edges at its own speed. */
+/* Encoder simulation: each wheel produces edges at its own speed.
+ * g_tpr_sim[] is the robot's REAL ticks per turn (may differ per wheel).
+ * With g_model set, wheel speed follows the PWM through a simple motor:
+ * deadband, gain (mm/s per permil, per wheel) and a 100 ms lag. */
 static uint32_t g_edge_acc[2];  /* thousandths of a tick */
 static int32_t g_wheel_mm_s[2];
+static uint32_t g_tpr_sim[2] = {930U, 930U};
+static int g_model;
+static double g_motor_gain[2] = {0.52, 0.52};
+static double g_model_v[2];
+#define MODEL_DEADBAND_PERMIL (60.0)
+#define MODEL_TAU_MS          (100.0)
+
+static double model_pwm(uint32_t i)
+{
+    const uint32_t pin_a = (i == 0U) ? 8U : 10U;
+    const double wrap = (double)s_pwm_wrap;
+    if (g_cc[pin_a] != 0U) { return  1000.0 * g_cc[pin_a] / wrap; }
+    if (g_cc[pin_a + 1U] != 0U) { return -1000.0 * g_cc[pin_a + 1U] / wrap; }
+    return 0.0;
+}
 
 static void sim_ms(uint32_t ms)
 {
@@ -101,12 +121,22 @@ static void sim_ms(uint32_t ms)
         g_now_us += 1000U;
         for (uint32_t i = 0U; i < 2U; ++i)
         {
+            if (g_model)
+            {
+                const double pwm = model_pwm(i);
+                const double mag = (pwm < 0.0) ? -pwm : pwm;
+                double target = (mag > MODEL_DEADBAND_PERMIL) ?
+                    g_motor_gain[i] * (mag - MODEL_DEADBAND_PERMIL) : 0.0;
+                if (pwm < 0.0) { target = -target; }
+                g_model_v[i] += (target - g_model_v[i]) / MODEL_TAU_MS;
+                g_wheel_mm_s[i] = (int32_t)g_model_v[i];
+            }
             /* A wheel only turns while S2 drives its PWM pins (A/B). */
             const uint32_t pin_a = (i == 0U) ? 8U : 10U;
             const bool driven = (g_cc[pin_a] != 0U) || (g_cc[pin_a + 1U] != 0U);
             int32_t v = (g_wheel_mm_s[i] < 0) ? -g_wheel_mm_s[i] : g_wheel_mm_s[i];
-            if (!driven) { v = 0; }
-            g_edge_acc[i] += ((uint32_t)v * 930U * 1000U) / (210U * 1000U);
+            if (!driven && !g_model) { v = 0; }
+            g_edge_acc[i] += ((uint32_t)v * g_tpr_sim[i] * 1000U) / (210U * 1000U);
             while (g_edge_acc[i] >= 1000U)
             {
                 g_edge_acc[i] -= 1000U;
@@ -117,14 +147,24 @@ static void sim_ms(uint32_t ms)
     }
 }
 
+static void fresh_start_cfg(uint32_t start_us, const b2_config_t *p_cfg);
 static void fresh_start(uint32_t start_us)
+{
+    fresh_start_cfg(start_us, &k_cfg);
+}
+static void fresh_start_cfg(uint32_t start_us, const b2_config_t *p_cfg)
 {
     g_now_us = start_us;
     g_wheel_mm_s[0] = 0;
     g_wheel_mm_s[1] = 0;
     g_edge_acc[0] = 0U;
     g_edge_acc[1] = 0U;
-    CHECK(b2_init(&k_cfg, NULL, NULL));
+    g_model = 0;
+    g_model_v[0] = 0.0;
+    g_model_v[1] = 0.0;
+    g_tpr_sim[0] = 930U;
+    g_tpr_sim[1] = 930U;
+    CHECK(b2_init(p_cfg, NULL, NULL));
     sim_ms(20U);
 }
 
@@ -338,6 +378,294 @@ static void test_odometry_saturates(void)
     CHECK(st.right_total_mm == INT16_MIN);
 }
 
+/* ---------- B2 task-list additions (19 Nov) ---------- */
+#include "../../../app_program/subsystem2/motion_cal.h"
+
+/* The demo configuration: straight-line correction on, D off. */
+static const b2_config_t k_cfg_demo = {
+    .ticks_per_rev_left = 930U, .ticks_per_rev_right = 930U,
+    .wheel_circumference_mm = 210U,
+    .wheel_track_mm = 120U, .max_speed_mm_s = 300U, .max_pwm_permil = 650U,
+    .encoder_stall_ms = 500U, .pwm_frequency_hz = 20000U,
+    .kp_q8 = 128U, .ki_q8 = 8U,
+    .kd_q8 = 0U, .straight_kp_q8 = 256U, .straight_trim_max_mm_s = 20U
+};
+
+static int32_t iabs(int32_t v) { return (v < 0) ? -v : v; }
+
+/* Calibration header: S5's constants are derived from it and must not
+ * change while the calibration values are unchanged. */
+static void test_calibration_header(void)
+{
+    CHECK(B2_CAL_TICKS_PER_REV_MEAN == 930U);
+    CHECK(B2_CAL_TICKS_PER_M == 4429U);             /* S5 had 4429 */
+    CHECK(B2_CAL_TURN_TICKS_PER_DEG_X10 == 46U);    /* S5 had 46 */
+    CHECK(b2_turn_to_mm(90U, 120U) == 94U);         /* pi*120/4 = 94.2 */
+    CHECK(b2_turn_to_ticks(90U, 120U, 930U, 210U) ==
+          b2_mm_to_ticks(94U, 930U, 210U));
+    /* config validation: zero ticks or a trim over 511 mm/s refused */
+    b2_config_t bad = k_cfg_demo;
+    bad.ticks_per_rev_right = 0U;
+    CHECK(!b2_init(&bad, NULL, NULL));
+    bad = k_cfg_demo;
+    bad.straight_trim_max_mm_s = 512U;
+    CHECK(!b2_init(&bad, NULL, NULL));
+}
+
+/* Drive straight for `ms` with a 10 % weaker right motor, re-sending the
+ * same speed every loop like S3/S5. Returns left-minus-right ticks. */
+static int32_t run_straight(const b2_config_t *p_cfg, int16_t speed,
+                            uint32_t ms, int32_t *p_speed_l, int32_t *p_speed_r)
+{
+    b2_status_t st;
+    fresh_start_cfg(6000000U, p_cfg);
+    g_model = 1;
+    g_motor_gain[0] = 0.52;
+    g_motor_gain[1] = 0.52 * 0.9;
+    const uint32_t start[2] = {s_irq_count[0], s_irq_count[1]};
+    b2_command_t c = speed_cmd(speed, speed);
+    for (uint32_t t = 0U; t < ms; t += 20U)
+    {
+        CHECK(b2_submit_command(&c));
+        sim_ms(20U);
+    }
+    b2_get_status(&st);
+    *p_speed_l = b2_speed_value(st.left_speed_ob);
+    *p_speed_r = b2_speed_value(st.right_speed_ob);
+    CHECK(st.fault_mask == 0U);
+    b2_stop();
+    sim_ms(300U);
+    g_model = 0;
+    g_motor_gain[1] = 0.52;
+    return (int32_t)(s_irq_count[0] - start[0]) -
+           (int32_t)(s_irq_count[1] - start[1]);
+}
+
+static void test_straight_line(void)
+{
+    int32_t vl, vr;
+    const int32_t off = run_straight(&k_cfg, 100, 5000U, &vl, &vr);
+    const int32_t on = run_straight(&k_cfg_demo, 100, 5000U, &vl, &vr);
+    printf("  straight 5 s @100 mm/s, right motor 10%% weak: L-R = %d ticks "
+           "(%.1f mm) without correction, %d ticks (%.1f mm) with; "
+           "end speeds %d/%d mm/s\n", off, off * 210.0 / 930.0, on,
+           on * 210.0 / 930.0, vl, vr);
+    CHECK(iabs(on) <= 5);               /* within ~1 mm */
+    CHECK(iabs(on) < iabs(off));
+    CHECK((vl >= 90) && (vl <= 110) && (vr >= 90) && (vr <= 110));
+    /* Also straight in reverse and at S3's line speed. */
+    CHECK(iabs(run_straight(&k_cfg_demo, -100, 3000U, &vl, &vr)) <= 5);
+    CHECK(iabs(run_straight(&k_cfg_demo, 70, 3000U, &vl, &vr)) <= 5);
+    CHECK(g_lock_depth == 0);
+}
+
+static void test_straight_trim_rules(void)
+{
+    fresh_start_cfg(7000000U, &k_cfg_demo);
+    uint32_t ticks[2];
+    s_straight_ref[0] = 0U;
+    s_straight_ref[1] = 0U;
+    /* steering (different speeds): no correction */
+    s_requested[0] = 70;
+    s_requested[1] = 30;
+    ticks[0] = 100U; ticks[1] = 0U;
+    CHECK(b2_straight_trim(ticks) == 0);
+    /* straight: the wheel ahead is slowed, clamped at 20 mm/s */
+    s_requested[1] = 70;
+    CHECK(b2_straight_trim(ticks) == 20);
+    ticks[0] = 0U; ticks[1] = 10U;
+    CHECK(b2_straight_trim(ticks) == -10);
+    /* on-the-spot turn (opposite signs, same size): also equalised */
+    s_requested[1] = -70;
+    CHECK(b2_straight_trim(ticks) == -10);
+    /* counter wrap between reference and now */
+    s_straight_ref[0] = 0xFFFFFFF0U;
+    s_straight_ref[1] = 0xFFFFFFF0U;
+    ticks[0] = 0x00000005U; ticks[1] = 0x00000000U;
+    CHECK(b2_straight_trim(ticks) == 5);
+    s_requested[0] = 0;
+    s_requested[1] = 0;
+
+    /* Re-sending the same pair keeps the reference; a new pair resets it. */
+    fresh_start_cfg(7500000U, &k_cfg_demo);
+    g_wheel_mm_s[0] = 70;
+    g_wheel_mm_s[1] = 70;
+    b2_command_t c = speed_cmd(70, 70);
+    CHECK(b2_submit_command(&c));
+    sim_ms(200U);
+    const uint32_t ref = s_straight_ref[0];
+    CHECK(b2_submit_command(&c));
+    sim_ms(100U);
+    CHECK(s_straight_ref[0] == ref);
+    c = speed_cmd(70, 30);
+    CHECK(b2_submit_command(&c));
+    sim_ms(20U);
+    CHECK(s_straight_ref[0] != ref);
+    b2_stop();
+    g_wheel_mm_s[0] = 0;
+    g_wheel_mm_s[1] = 0;
+    sim_ms(300U);
+
+    /* Per-wheel calibration: equal distance is NOT equal ticks. */
+    b2_config_t cfg = k_cfg_demo;
+    cfg.ticks_per_rev_left = 962U;
+    cfg.ticks_per_rev_right = 896U;
+    fresh_start_cfg(7800000U, &cfg);
+    s_requested[0] = 70;
+    s_requested[1] = 70;
+    s_straight_ref[0] = 0U;
+    s_straight_ref[1] = 0U;
+    ticks[0] = 962U; ticks[1] = 896U;   /* one wheel turn each */
+    CHECK(b2_straight_trim(ticks) == 0);
+    s_requested[0] = 0;
+    s_requested[1] = 0;
+    CHECK(g_lock_depth == 0);
+}
+
+/* Wheels with different ticks per turn (2026-11-08: L 962, R 896). */
+static void test_per_wheel_calibration(void)
+{
+    b2_config_t cfg = k_cfg_demo;
+    cfg.ticks_per_rev_left = 962U;
+    cfg.ticks_per_rev_right = 896U;
+    fresh_start_cfg(8000000U, &cfg);
+    g_tpr_sim[0] = 962U;
+    g_tpr_sim[1] = 896U;
+    b2_status_t st;
+    const uint32_t start[2] = {s_irq_count[0], s_irq_count[1]};
+    b2_command_t g = {0};
+    g.type = B2_CMD_MOVE_FORWARD;
+    g.distance_mm = 210U;           /* one wheel turn */
+    g.goal_speed_mm_s = 100U;
+    g.timeout_ms = 6000U;
+    CHECK(s_goal_ticks[0] == 0U);
+    CHECK(b2_submit_command(&g));
+    g_wheel_mm_s[0] = 100;
+    g_wheel_mm_s[1] = 100;
+    sim_ms(20U);
+    CHECK((s_goal_ticks[0] == 962U) && (s_goal_ticks[1] == 896U));
+    sim_ms(2500U);
+    g_wheel_mm_s[0] = 0;
+    g_wheel_mm_s[1] = 0;
+    sim_ms(50U);
+    b2_get_status(&st);
+    CHECK(st.goals_done == 1U);
+    CHECK((s_irq_count[0] - start[0]) >= 962U);
+    CHECK((s_irq_count[1] - start[1]) >= 896U);
+    /* both wheels report the same distance despite different tick counts */
+    CHECK((st.left_total_mm >= 205) && (st.left_total_mm <= 220));
+    CHECK((st.right_total_mm >= 205) && (st.right_total_mm <= 220));
+    CHECK(iabs(st.left_total_mm - st.right_total_mm) <= 3);
+    CHECK(g_lock_depth == 0);
+}
+
+/* Step 0 -> 150 mm/s on the motor model; returns the peak speed. */
+static int32_t step_peak(uint16_t kd, int32_t *p_final)
+{
+    b2_config_t cfg = k_cfg_demo;
+    cfg.kd_q8 = kd;
+    b2_status_t st;
+    int32_t peak = 0;
+    fresh_start_cfg(9000000U, &cfg);
+    g_model = 1;
+    b2_command_t c = speed_cmd(150, 150);
+    CHECK(b2_submit_command(&c));
+    for (uint32_t t = 0U; t < 3000U; t += 20U)
+    {
+        sim_ms(20U);
+        b2_get_status(&st);
+        if (b2_speed_value(st.left_speed_ob) > peak)
+        {
+            peak = b2_speed_value(st.left_speed_ob);
+        }
+    }
+    *p_final = b2_speed_value(st.left_speed_ob);
+    b2_stop();
+    sim_ms(300U);
+    g_model = 0;
+    return peak;
+}
+
+static void test_pid_d_term(void)
+{
+    int32_t final0, final_d;
+    const int32_t peak0 = step_peak(0U, &final0);
+    const int32_t peak_d = step_peak(512U, &final_d);
+    printf("  step 0->150 mm/s on the motor model: kd=0 peak %d final %d; "
+           "kd=2.0 peak %d final %d\n", peak0, final0, peak_d, final_d);
+    CHECK((final0 >= 140) && (final0 <= 160));
+    CHECK((final_d >= 140) && (final_d <= 160));   /* D does not destabilise */
+    /* One encoder tick per 20 ms loop is ~11 mm/s, so the measured speed
+     * is coarse and D changes the peak by only a few mm/s either way
+     * (kd 0..8.0 swept: 161..164). Hence kd = 0 in the demo config. */
+    CHECK(iabs(peak_d - peak0) <= 5);
+    CHECK(g_lock_depth == 0);
+}
+
+static void test_api_wrappers(void)
+{
+    b2_goal_t goal;
+    fresh_start_cfg(10000000U, &k_cfg_demo);
+    CHECK(!b2_move_forward(0U, NULL));              /* nothing to do */
+    CHECK(!b2_move_forward(1200U, NULL));           /* > 10.23 s at 120 mm/s */
+    CHECK(!b2_turn_left(361U, NULL));
+    CHECK(!b2_turn_right(0U, NULL));
+    CHECK(b2_move_forward(1100U, NULL));            /* fits: 9.2 s + 1 s */
+    CHECK(s_mailbox.type == B2_CMD_MOVE_FORWARD);
+    CHECK(s_mailbox.distance_mm == 1100U);
+    CHECK(s_mailbox.goal_speed == B2_API_MOVE_SPEED_MM_S);
+    CHECK(s_mailbox.timeout_10ms == 1023U);         /* capped at 10.23 s */
+    b2_stop();
+    sim_ms(300U);
+
+    /* A turn goal, followed with b2_goal_check, on the motor model with
+     * a weak right motor: both wheels finish together. */
+    g_model = 1;
+    g_motor_gain[1] = 0.52 * 0.9;
+    const uint32_t start[2] = {s_irq_count[0], s_irq_count[1]};
+    CHECK(b2_turn_left(90U, &goal));
+    CHECK(s_mailbox.type == B2_CMD_TURN_LEFT);
+    CHECK(s_mailbox.turn_deg == 90U);
+    CHECK(s_mailbox.goal_speed == B2_API_TURN_SPEED_MM_S);
+    CHECK(s_mailbox.timeout_10ms == 335U);          /* 94 mm @80 -> 2x1.175+1 s */
+    CHECK(!b2_move_backward(100U, NULL));           /* one goal at a time */
+    b2_goal_result_t r = B2_GOAL_RUNNING;
+    for (uint32_t t = 0U; (t < 4000U) && (r == B2_GOAL_RUNNING); t += 20U)
+    {
+        sim_ms(20U);
+        r = b2_goal_check(&goal);
+    }
+    CHECK(r == B2_GOAL_DONE);
+    const int32_t dl = (int32_t)(s_irq_count[0] - start[0]);
+    const int32_t dr = (int32_t)(s_irq_count[1] - start[1]);
+    printf("  b2_turn_left(90): L %d ticks, R %d ticks (goal %u each)\n",
+           dl, dr, (unsigned)s_goal_ticks[0]);
+    CHECK(dl >= (int32_t)s_goal_ticks[0]);
+    CHECK(dr >= (int32_t)s_goal_ticks[1]);
+    CHECK(iabs(dl - dr) <= 10);
+    g_model = 0;
+    g_motor_gain[1] = 0.52;
+    sim_ms(300U);
+
+    /* Refused while tracking a speed (not READY) or braked. */
+    b2_command_t c = speed_cmd(100, 100);
+    g_wheel_mm_s[0] = 100;
+    g_wheel_mm_s[1] = 100;
+    CHECK(b2_submit_command(&c));
+    sim_ms(40U);
+    CHECK(!b2_move_forward(100U, NULL));
+    b2_emergency_brake();
+    g_wheel_mm_s[0] = 0;
+    g_wheel_mm_s[1] = 0;
+    sim_ms(300U);
+    CHECK(!b2_turn_right(90U, NULL));
+    CHECK(b2_authorized_reset_while_stopped());
+    CHECK(b2_move_backward(100U, NULL));
+    b2_stop();
+    sim_ms(300U);
+    CHECK(g_lock_depth == 0);
+}
+
 int main(void)
 {
     test_sizes();
@@ -348,6 +676,12 @@ int main(void)
     test_stall_and_reset();
     test_emergency_brake();
     test_odometry_saturates();
+    test_calibration_header();
+    test_straight_line();
+    test_straight_trim_rules();
+    test_per_wheel_calibration();
+    test_pid_d_term();
+    test_api_wrappers();
     CHECK(g_lock_depth == 0);
     CHECK(g_lock_depth_max == 1);   /* s_lock is never taken twice */
     printf("S2 motion host test: %d checks, %d failed\n", g_checks, g_failures);

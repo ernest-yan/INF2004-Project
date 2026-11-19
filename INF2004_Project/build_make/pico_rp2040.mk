@@ -91,6 +91,20 @@ ifeq ($(TEST),1)
 TEST_SUFFIX := _test
 endif
 
+# S2_CAL=1 (with TEST=1) adds subsystem 2's calibration run after its
+# self-tests: the robot DRIVES on the floor. See
+# testing/subsystem2/CALIBRATION.md. Image suffix _s2cal.
+S2_CAL ?= 0
+ifneq ($(filter $(S2_CAL),0 1),$(S2_CAL))
+$(error Unknown S2_CAL '$(S2_CAL)'; use 0 or 1)
+endif
+ifeq ($(S2_CAL),1)
+ifneq ($(TEST),1)
+$(error S2_CAL=1 needs TEST=1)
+endif
+TEST_SUFFIX := _test_s2cal
+endif
+
 # CRASH_REPORT=1 also copies every console line to UART0 on GP0 (TX) /
 # GP1 (RX), 115200 8N1.  UART output is sent immediately, so it still shows
 # the last messages and the kernel's crash report after a crash, when the
@@ -177,6 +191,7 @@ CFLAGS  += -DCNF_SMP=1
 ASFLAGS += -DCNF_SMP=1
 endif
 CFLAGS  += -DAPP_TEST=$(TEST)
+CFLAGS  += -DS2_CAL_RUN=$(S2_CAL)
 CFLAGS  += -DTM_CONSOLE_UART=$(CRASH_REPORT)
 ifeq ($(CRASH_REPORT),0)
 CFLAGS  += -DBOARD_UART0_FREE=1
@@ -209,7 +224,7 @@ endif
 # before any recipe executes.
 ################################################################################
 
-PROFILE_ID := smp$(SMP)-$(CONSOLE)-wifi$(WIFI)-net$(NET)-mqtt$(MQTT)-crash$(CRASH_REPORT)-test$(TEST)
+PROFILE_ID := smp$(SMP)-$(CONSOLE)-wifi$(WIFI)-net$(NET)-mqtt$(MQTT)-crash$(CRASH_REPORT)-test$(TEST)-s2cal$(S2_CAL)
 PROFILE_FILE := .build_profile
 
 ifneq ($(strip $(shell cat $(PROFILE_FILE) 2>/dev/null)),$(PROFILE_ID))

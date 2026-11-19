@@ -99,7 +99,7 @@ int main(void)
 {
     /* sizes of the packed team structs */
     CHECK(sizeof(vehicle_status_t) == 2U);
-    CHECK(sizeof(line_status_t) == 2U);
+    CHECK(sizeof(line_status_t) == 3U);     /* + letter, seen-not-decoded */
     CHECK(sizeof(motion_status_t) == 8U);
     CHECK(sizeof(imu_status_t) == 10U);
     CHECK(sizeof(ultra_status_t) == 8U);
@@ -218,7 +218,14 @@ int main(void)
             g_l.last_code = s3_char_to_code(k[n].c);
             line_get_status(&l);
             CHECK(l.last_barcode == k[n].cmd);
+            CHECK(s3_code_to_char(l.letter_code) == k[n].c);   /* letter sent too */
         }
+    }
+    g_l.scan_fail_count = 3U;
+    {
+        line_status_t l;
+        line_get_status(&l);
+        CHECK(l.scan_fail_count == 3U);
     }
     for (char c = 'A'; c <= 'Z'; c++) { CHECK(s3_code_to_char(s3_char_to_code(c)) == c); }
     for (char c = '0'; c <= '9'; c++) { CHECK(s3_code_to_char(s3_char_to_code(c)) == c); }

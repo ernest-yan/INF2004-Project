@@ -101,6 +101,16 @@ LOCAL void detect_events(UH session, const vehicle_status_t *p_v,
 		tlm_event_t x = {0};
 		x.type = (uint8_t)TLM_EVT_BARCODE;
 		x.a    = p_l->last_barcode;
+		x.b    = p_l->letter_code;	/* the letter itself (rubric #2) */
+		send_event(&x, session);
+	}
+	if (p_l->scan_fail_count != g_prev_l.scan_fail_count) {
+		/* A barcode was SEEN but gave no letter (rubric #1): action NONE,
+		   letter 0.  The dashboard shows "seen, not decoded". */
+		tlm_event_t x = {0};
+		x.type = (uint8_t)TLM_EVT_BARCODE;
+		x.a    = (uint8_t)BARCODE_NONE;
+		x.b    = 0u;
 		send_event(&x, session);
 	}
 	if (p_i->hump_count != g_prev_i.hump_count) {

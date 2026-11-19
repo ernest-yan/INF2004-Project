@@ -108,9 +108,12 @@ test_reset_and_map(void)
           == TLM_RES_ACCEPTED);
     CHECK(out.code == TLM_CMD_RESET);
 
-    /* 2. MAP: 9 bytes, letters come back in order */
+    /* 2. MAP: 8 bytes, letters as 6-bit codes (CR1), back in order.
+          F=6 U=21 L=12 R=18 -> 24 bits after the 40-bit header. */
     CHECK(make_map("FULR", session, 2u, buf) == TLM_CMD_MAP_LEN);
-    CHECK(buf[5] == 'F' && buf[8] == 'R');
+    CHECK(TLM_CMD_MAP_LEN == 8u);
+    CHECK((((uint32_t)buf[5] << 16) | ((uint32_t)buf[6] << 8) | buf[7]) ==
+          ((6u << 18) | (21u << 12) | (12u << 6) | 18u));
     CHECK(tlm_cmd_validate(buf, TLM_CMD_MAP_LEN, session, &last_seq, &out)
           == TLM_RES_ACCEPTED);
     CHECK(out.code == TLM_CMD_MAP && memcmp(out.map, "FULR", 4) == 0);
@@ -133,7 +136,14 @@ test_reset_and_map(void)
           == TLM_RES_BAD_CMD);
     CHECK(last_seq == 3u);
 
-    /* 5. MAP cut to 5 bytes, or START padded to 9: BAD_LEN */
+    /* 4b. a code that is not a letter (37..63) is refused too */
+    make_map("FULR", session, 4u, buf);
+    buf[7] = (uint8_t)((buf[7] & 0xC0u) | 63u);    /* last letter -> 63 */
+    CHECK(tlm_cmd_validate(buf, TLM_CMD_MAP_LEN, session, &last_seq, &out)
+          == TLM_RES_BAD_CMD);
+    CHECK(last_seq == 3u);
+
+    /* 5. MAP cut to 5 bytes, or START padded to 8: BAD_LEN */
     make_map("FULR", session, 4u, buf);
     CHECK(tlm_cmd_validate(buf, TLM_CMD_LEN, session, &last_seq, &out)
           == TLM_RES_BAD_LEN);

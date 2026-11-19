@@ -18,7 +18,7 @@ Define a test here before running it. Test IDs never change.
 | S1-U06 | offline (session 0) rejects everything | MQTT protocol | auto | `subsystem1_test.c` | `[TEST] S1-U06 PASS` |
 | S1-U07 | wrong length rejected | MQTT protocol | auto | `subsystem1_test.c` | `[TEST] S1-U07 PASS` |
 | S1-U08 | unknown command code rejected | MQTT protocol | auto | `subsystem1_test.c` | `[TEST] S1-U08 PASS` |
-| S1-U09 | STATUS frame is 17 bytes, big values clamp | Minimum-Bit | auto | `subsystem1_test.c` | `[TEST] S1-U09 PASS` |
+| S1-U09 | STATUS frame is 21 bytes, big values clamp | Minimum-Bit | auto | `subsystem1_test.c` | `[TEST] S1-U09 PASS` |
 | S1-U10 | encoder refuses a too-small buffer | Minimum-Bit | auto | `subsystem1_test.c` | `[TEST] S1-U10 PASS` |
 | S1-U11 | command queue exists and holds exactly 4 commands | IF-13 | auto | `subsystem1_test.c` | `[TEST] S1-U11 PASS` |
 | S1-U12 | telemetry task running at priority 13 | TEAM.md §4 | auto | `subsystem1_test.c` | `[TEST] S1-U12 PASS` |
@@ -38,8 +38,9 @@ Define a test here before running it. Test IDs never change.
 *Method:* **auto** = `TEST_CHECK` in code, result printed on the console;
 **manual** = a person observes the result (LED, scope, meter, phone app…).
 
-Note: remote START / STOP / E-STOP only log a message until the team
-decides what they do (S1-M05 checks the path, not the robot's reaction).
+Note: remote START / STOP / E-STOP / RESET / MAP act on the robot as agreed
+in TEAM.md IF-15 to IF-18 (2026-11-19). S1-M05 checks the command path; the
+robot's reaction is covered by the bench test of 8 Nov.
 
 ## Results
 
@@ -48,3 +49,10 @@ Add a new row for every run. Never edit or delete old rows.
 | Date | Test ID | Commit | Tester | Result | Log / evidence | Notes |
 |---|---|---|---|---|---|---|
 | YYYY-MM-DD | S1-U01 | `abc1234` | | PASS / FAIL | `logs/YYYY-MM-DD_….txt` | |
+| 2026-11-08 | S1-M05 | `0a82622` + S2 fixes | bench session | PASS | [2026-11-08_bench_test_results.md](2026-11-08_bench_test_results.md), tests 1, 5–8 | START, STOP, E-STOP, START-while-latched (refused), RESET all handled; link stayed up. The CSV cited in that report (`logs/2026-11-07_dashboard.csv`) is empty in the repo, so the report is the only record |
+| 2026-11-08 | S1-M01 | `0a82622` + S2 fixes | bench session | PASS | bench report, test 1 | Live wheel speeds (100 mm/s for 80 s) shown while the motors drove, wheels lifted; not the hand-turn procedure |
+| 2026-11-16 | S1-M01 | see log | run logs | PASS | `logs/2026-11-13_dashboard.csv`, `logs/2026-11-16_dashboard_groupmate.csv` | enc_l up to 48 234, speed_l up to 641 mm/s while driving |
+| 2026-11-16 | S1-M02 | see log | run logs | PASS | as above | `line` showed all four values (0 lost, 1 centre, 2 left, 3 junction) during floor runs; from run data, not the tape-under-sensor bench procedure |
+| 2026-11-16 | S1-M03 | see log | run logs | PASS | as above | `pitch` varied −34 to +54 deg (car handled / tilted) |
+| 2026-11-16 | S1-M04 | see log | run logs | PASS | as above | `obs_cm` changed with obstacles (under 100 cm and 100–510 cm) and showed 511 with no echo |
+| 2026-11-16 | S1-M05 | see log | run logs | PASS | as above | 121 commands ACKed: START, STOP, RESET, MAP ACCEPTED; replays rejected STALE_SEQ, old-session commands BAD_SESSION (no E-STOP in these logs) |

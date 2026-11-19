@@ -6,6 +6,7 @@
 
 #include "../app.h"
 #include "profile.h"
+#include "../subsystem2/motion_cal.h"
 
 /* Pin allocation (moved off GP4/GP5 to avoid the S3 centre line sensor on GP4).
  * !! GP0/GP1 are also UART0: do NOT build with CRASH_REPORT=1 or CONSOLE=uart
@@ -51,11 +52,12 @@
 #define subsystem5_BYPASS_PASS_MAX_MM     (900U)
 #define subsystem5_BYPASS_SEEK_EXTRA_MM   (250U)
 #define subsystem5_BYPASS_TIMEOUT_MS      (20000U)
-/* Encoder scale, from S2's calibration (930 ticks per 210 mm wheel turn,
- * 120 mm track). Only sizes the legs and the turn limits: the turns that
- * matter are matched to each other by count, not by angle. */
-#define subsystem5_TICKS_PER_M            (4429U)
-#define subsystem5_TICKS_PER_DEG_X10      (46U)
+/* Encoder scale, derived from S2's calibration (subsystem2/motion_cal.h:
+ * 930 ticks per 210 mm wheel turn, 120 mm track gives 4429 and 46), so a
+ * re-calibration of S2 reaches the bypass too. Only sizes the legs and the
+ * turn limits: the turns that matter are matched by count, not by angle. */
+#define subsystem5_TICKS_PER_M            ((uint32_t)B2_CAL_TICKS_PER_M)
+#define subsystem5_TICKS_PER_DEG_X10      (B2_CAL_TURN_TICKS_PER_DEG_X10)
 
 typedef enum
 {

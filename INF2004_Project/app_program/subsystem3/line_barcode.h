@@ -82,7 +82,10 @@ typedef struct __attribute__((packed)) {
     uint8_t ir_center_raw  : 1;
     uint8_t ir_right_raw   : 1;
     uint8_t fault_mask     : 1; /* bit 0 = FAULT_LINE_LOSS (only fault) */
-    uint8_t                : 2;
+    uint8_t scan_fail_count : 2; /* S1: +1 per scan of 9+ bars/spaces that
+                                    gave no letter (barcode SEEN, not decoded);
+                                    wraps. Scans end >= 400 ms apart and S1
+                                    reads every 200 ms, so 2 bits never miss. */
     uint8_t scanned_code   : 6; /* S3_CODE, this call only */
     uint8_t                : 2;
     uint8_t last_code      : 6; /* S1: newest decoded letter, NONE = none yet */

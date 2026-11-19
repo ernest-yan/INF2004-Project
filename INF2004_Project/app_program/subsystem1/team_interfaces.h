@@ -139,7 +139,10 @@ typedef struct
     uint8_t last_barcode : 3; /* barcode_cmd_t */
     uint8_t : 3;
     uint8_t barcode_count;   /* +1 per decoded barcode (event trigger), wraps */
-} line_status_t;             /* CR1: 4 -> 2 bytes */
+    uint8_t letter_code : 6; /* the decoded letter itself (S3_CODE: 1-26 = A-Z,
+                                27-36 = 0-9, 0 = none), sent in the event */
+    uint8_t scan_fail_count : 2; /* +1 per barcode SEEN but not decoded, wraps */
+} line_status_t;             /* CR1: 4 -> 3 bytes (was 2 before the letter) */
 
 void line_get_status(line_status_t *p_out);
 

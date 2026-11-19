@@ -10,8 +10,13 @@
  *
  *	IF-03  any -> S2   function API in motion.h:
  *	         b2_submit_command(), b2_stop(), b2_emergency_brake(),
- *	         b2_get_status(), b2_authorized_reset_while_stopped()
+ *	         b2_get_status(), b2_authorized_reset_while_stopped(),
+ *	         b2_goal_start() / b2_goal_check(), and the write-up's
+ *	         b2_move_forward(), b2_move_backward(), b2_turn_left(),
+ *	         b2_turn_right()
  *	       All of these are safe from any task on either core.
+ *
+ *	Calibration (ticks per wheel turn, wheel size, track): motion_cal.h
  */
 
 #ifndef B2_TKERNEL_ADAPTER_H

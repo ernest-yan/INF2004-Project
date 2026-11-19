@@ -79,8 +79,12 @@ static volatile uint32_t s_last_edge_us[2]; /* CR1: was uint64_t, which the
                                                ISR stored in two halves */
 static b2_cmd_packed_t s_mailbox;
 static b2_cmd_packed_t s_active;
-static uint32_t s_goal_ticks;
+static uint32_t s_goal_ticks[2];    /* per wheel: calibration may differ */
 static uint32_t s_start_ticks[2];
+/* Straight-line correction: encoder counts when the current straight
+ * (or on-the-spot) segment began. Motion task only. */
+static uint32_t s_straight_ref[2];
+static int16_t s_prev_speed[2];     /* |speed| last loop, for the D term */
 static uint32_t s_prev_ticks[2];
 static int16_t s_requested[2];      /* -511..511 mm/s */
 static int16_t s_integral[2];       /* clamped to +-B2_INTEGRAL_LIMIT */
@@ -133,6 +137,12 @@ static uint32_t b2_speed_field(int32_t mm_s)
 static bool b2_time_after(uint32_t a, uint32_t b)
 {
     return (int32_t)(a - b) > 0;
+}
+/* Encoder edges per turn of wheel `wheel` (0 = left, 1 = right). */
+static uint32_t b2_tpr(uint32_t wheel)
+{
+    return (wheel == 0U) ? s_cfg->ticks_per_rev_left :
+                           s_cfg->ticks_per_rev_right;
 }
 /* Call with s_lock held. */
 static int32_t b2_wheel_speed_locked(uint32_t i)
@@ -229,7 +239,9 @@ static void b2_configure_pin(unsigned int gpio)
 }
 bool b2_init(const b2_config_t *config, b2_event_publish_fn publish, void *ctx)
 {
-    if ((config == NULL) || (config->ticks_per_wheel_rev == 0U) ||
+    if ((config == NULL) || (config->ticks_per_rev_left == 0U) ||
+        (config->ticks_per_rev_right == 0U) ||
+        (config->straight_trim_max_mm_s > B2_SPEED_LIMIT_MM_S) ||
         (config->wheel_circumference_mm == 0U) ||
         (config->wheel_track_mm == 0U) ||
         (config->max_speed_mm_s == 0U) ||
@@ -273,6 +285,8 @@ bool b2_init(const b2_config_t *config, b2_event_publish_fn publish, void *ctx)
     s_own.event_pending = 0U;
     s_last_poll_us = 0U;
     s_last_stopped_check_us = 0U;
+    s_prev_speed[0] = 0;
+    s_prev_speed[1] = 0;
     {
         const uint32_t wrap = (APP_CLK_SYS_HZ / config->pwm_frequency_hz) - 1U;
         if ((wrap < 100U) || (wrap > 65535U))   /* PORT */
@@ -488,7 +502,8 @@ static void b2_start_command(const b2_cmd_packed_t *cmd, uint32_t tick_l,
     }
     s_start_ticks[0] = tick_l;
     s_start_ticks[1] = tick_r;
-    s_goal_ticks = 0U;
+    s_goal_ticks[0] = 0U;
+    s_goal_ticks[1] = 0U;
     if (cmd->type == B2_CMD_SPEED)
     {
         request[0] = b2_speed_value(cmd->left_ob);
@@ -517,14 +532,30 @@ static void b2_start_command(const b2_cmd_packed_t *cmd, uint32_t tick_l,
             request[0] = goal_speed;
             request[1] = -goal_speed;
         }
-        s_goal_ticks = (cmd->type <= B2_CMD_MOVE_BACKWARD) ?
-            b2_mm_to_ticks(cmd->distance_mm, s_cfg->ticks_per_wheel_rev,
-                           s_cfg->wheel_circumference_mm) :
-            b2_turn_to_ticks(cmd->turn_deg, s_cfg->wheel_track_mm,
-                             s_cfg->ticks_per_wheel_rev,
-                             s_cfg->wheel_circumference_mm);
-        if (s_goal_ticks < B2_MIN_TICKS) { s_goal_ticks = B2_MIN_TICKS; }
+        /* Each wheel has its own ticks per turn, so the same path is a
+         * different tick count on each side. */
+        const uint32_t path_mm = (cmd->type <= B2_CMD_MOVE_BACKWARD) ?
+            (uint32_t)cmd->distance_mm :
+            b2_turn_to_mm(cmd->turn_deg, s_cfg->wheel_track_mm);
+        for (uint32_t wheel = 0U; wheel < 2U; ++wheel)
+        {
+            s_goal_ticks[wheel] = b2_mm_to_ticks(path_mm, b2_tpr(wheel),
+                                  s_cfg->wheel_circumference_mm);
+            if (s_goal_ticks[wheel] < B2_MIN_TICKS)
+            {
+                s_goal_ticks[wheel] = B2_MIN_TICKS;
+            }
+        }
         s_status.state = B2_EXECUTE_GOAL;
+    }
+    /* Straight-line correction measures from the start of a segment.
+     * S3 and S5 re-send the same speed pair every loop, so the segment
+     * only restarts when the pair really changes (or a goal starts). */
+    if ((!continuous_speed) || (request[0] != previous[0]) ||
+        (request[1] != previous[1]))
+    {
+        s_straight_ref[0] = tick_l;
+        s_straight_ref[1] = tick_r;
     }
     s_requested[0] = (int16_t)request[0];   /* |request| <= 511 */
     s_requested[1] = (int16_t)request[1];
@@ -549,6 +580,49 @@ static void b2_start_command(const b2_cmd_packed_t *cmd, uint32_t tick_l,
         }
     }
     s_own.was_moving = 1U;
+}
+/* Straight-line correction (motion task only).
+ * While both wheels are asked for the same speed (driving straight, or
+ * turning on the spot), compare how far each wheel has travelled since the
+ * segment began. Returns the mm/s to take off the left set-point and add to
+ * the right one (negative: the other way round), so a weaker motor or a
+ * dragging wheel does not make the robot curve. Travel is compared as
+ * distance, not raw ticks, so wheels with different ticks per turn still
+ * drive straight. 0 when the speeds differ (S3 steering) or the gain is 0. */
+static int32_t b2_straight_trim(const uint32_t p_ticks[2])
+{
+    int64_t trim = 0;
+    const int32_t speed_l = b2_abs32((int32_t)s_requested[0]);
+
+    if ((s_cfg->straight_kp_q8 != 0U) && (speed_l != 0) &&
+        (speed_l == b2_abs32((int32_t)s_requested[1])))
+    {
+        const int64_t tpr_l = (int64_t)b2_tpr(0U);
+        const int64_t tpr_r = (int64_t)b2_tpr(1U);
+        /* Unsigned subtraction: correct across counter wrap. */
+        const int64_t done_l = (int64_t)(p_ticks[0] - s_straight_ref[0]);
+        const int64_t done_r = (int64_t)(p_ticks[1] - s_straight_ref[1]);
+        /* L minus R travel, in mean-wheel ticks (cross-multiplied). */
+        const int64_t ahead = (((done_l * tpr_r) - (done_r * tpr_l)) * 2) /
+                              (tpr_l + tpr_r);
+        const int64_t limit = (int64_t)s_cfg->straight_trim_max_mm_s;
+
+        trim = (ahead * (int64_t)s_cfg->straight_kp_q8) / 256;
+        if (trim > limit)
+        {
+            trim = limit;
+        }
+        else if (trim < -limit)
+        {
+            trim = -limit;
+        }
+        else
+        {
+            /* within the limit: used as is */
+        }
+    }
+    /* (int32_t): clamped to +-straight_trim_max_mm_s (<= 511) above. */
+    return (int32_t)trim;
 }
 void b2_poll(void)
 {
@@ -600,10 +674,10 @@ void b2_poll(void)
     {
         const int32_t direction = (s_requested[i] < 0) ? -1 : 1;
         const int32_t raw = direction * b2_speed_mm_s(deltas[i], elapsed_ms,
-            s_cfg->ticks_per_wheel_rev, s_cfg->wheel_circumference_mm);
+            b2_tpr(i), s_cfg->wheel_circumference_mm);
         s_signed_encoder_ticks[i] += direction * (int32_t)deltas[i];
         const int64_t total_mm = ((int64_t)s_signed_encoder_ticks[i] *
-            s_cfg->wheel_circumference_mm) / s_cfg->ticks_per_wheel_rev;
+            s_cfg->wheel_circumference_mm) / (int64_t)b2_tpr(i);
         const int16_t total = (total_mm > INT16_MAX) ? INT16_MAX :
                               (total_mm < INT16_MIN) ? INT16_MIN :
                               (int16_t)total_mm;
@@ -653,8 +727,8 @@ void b2_poll(void)
                 return;
             }
             bool reached[2];
-            reached[0] = ((ticks[0] - s_start_ticks[0]) >= s_goal_ticks);
-            reached[1] = ((ticks[1] - s_start_ticks[1]) >= s_goal_ticks);
+            reached[0] = ((ticks[0] - s_start_ticks[0]) >= s_goal_ticks[0]);
+            reached[1] = ((ticks[1] - s_start_ticks[1]) >= s_goal_ticks[1]);
             if (reached[0]) { s_requested[0] = 0; }
             if (reached[1]) { s_requested[1] = 0; }
             if (reached[0] && reached[1])
@@ -674,29 +748,45 @@ void b2_poll(void)
         actual[0] = b2_wheel_speed_locked(0U);
         actual[1] = b2_wheel_speed_locked(1U);
         app_unlock(&s_lock, irq);
+        const int32_t trim = b2_straight_trim(ticks);
         for (uint32_t i = 0U; i < 2U; ++i)
         {
             const int32_t request = s_requested[i];
+            const int32_t speed_now = b2_abs32(actual[i]);
+            const int32_t speed_prev = s_prev_speed[i];
+            /* (int16_t): clamped to the 10-bit speed range just above. */
+            s_prev_speed[i] = (int16_t)b2_clamp(speed_now, 0,
+                                                (int32_t)B2_SPEED_LIMIT_MM_S);
             if (request == 0)
             {
                 pwm_cmd[i] = 0;
                 s_integral[i] = 0;
                 continue;
             }
-            const int32_t error = b2_abs32(request) - b2_abs32(actual[i]);
+            /* Set-point after the straight-line trim: the wheel that is
+             * ahead is slowed, the one behind is sped up. */
+            const int32_t target = b2_clamp(b2_abs32(request) +
+                                            ((i == 0U) ? -trim : trim),
+                                            0, (int32_t)s_cfg->max_speed_mm_s);
+            const int32_t error = target - speed_now;
             /* +-8000 * ki 8/256 = +-250 permil: room for a slope, but no
              * longer enough to drive the motor on its own (was +-20000,
              * = +-625 of the 650 permil maximum). */
             s_integral[i] = (int16_t)b2_clamp((int32_t)s_integral[i] + error,
                                               -B2_INTEGRAL_LIMIT,
                                               B2_INTEGRAL_LIMIT);
-            const int32_t ff = ((int32_t)s_cfg->max_pwm_permil *
-                                b2_abs32(request)) / s_cfg->max_speed_mm_s;
+            const int32_t ff = ((int32_t)s_cfg->max_pwm_permil * target) /
+                               (int32_t)s_cfg->max_speed_mm_s;
             const int32_t p = ((int32_t)s_cfg->kp_q8 * error) / 256;
             const int32_t integral =
                 ((int32_t)s_cfg->ki_q8 * s_integral[i]) / 256;
-            const int32_t duty = b2_clamp(ff + p + integral,
-                                             B2_MIN_OUTPUT, s_cfg->max_pwm_permil);
+            /* D on the measurement, not the error: a set-point step (S3
+             * steering) gives no derivative kick. Opposes acceleration. */
+            const int32_t derivative =
+                -(((int32_t)s_cfg->kd_q8 * (speed_now - speed_prev)) / 256);
+            const int32_t duty = b2_clamp(ff + p + integral + derivative,
+                                          B2_MIN_OUTPUT,
+                                          (int32_t)s_cfg->max_pwm_permil);
             pwm_cmd[i] = (request < 0) ? -duty : duty;
             /* INTEGRATION FIX: an encoder edge can land between reading `now`
              * and taking the lock, making the edge newer than `now`; the
@@ -752,4 +842,73 @@ void b2_poll(void)
         b2_queue_event(B2_EVENT_STOPPED, B2_FAULT_NONE);
     }
     b2_deliver_event();
+}
+
+/* ---- Motion API in the write-up's terms (moveForward, turnLeft, ...) ---- */
+
+#define B2_API_MARGIN_MS      (1000U)   /* added to every goal timeout */
+
+/* Start a MOVE / TURN goal of `amount` mm or degrees at the API speed.
+ * The timeout is twice the expected time plus a margin, capped at the
+ * largest timeout the 10-bit field holds. */
+static bool b2_api_goal(b2_cmd_type_t type, uint16_t amount,
+                        b2_goal_t *p_goal)
+{
+    const bool b_turn = ((type == B2_CMD_TURN_LEFT) ||
+                         (type == B2_CMD_TURN_RIGHT));
+    const uint32_t speed_mm_s = b_turn ? B2_API_TURN_SPEED_MM_S :
+                                         B2_API_MOVE_SPEED_MM_S;
+    const uint32_t limit = b_turn ? B2_TURN_MAX_DEG : B2_DISTANCE_MAX_MM;
+    b2_command_t cmd = {0};
+    bool b_accepted = false;
+
+    if ((s_shared.ready != 0U) && (amount != 0U) &&
+        ((uint32_t)amount <= limit))
+    {
+        const uint32_t path_mm = b_turn ?
+            b2_turn_to_mm((uint32_t)amount, s_cfg->wheel_track_mm) :
+            (uint32_t)amount;
+        const uint32_t expected_ms = (path_mm * 1000U) / speed_mm_s;
+
+        if ((expected_ms + B2_API_MARGIN_MS) <= B2_TIMEOUT_MAX_MS)
+        {
+            uint32_t timeout_ms = (expected_ms * 2U) + B2_API_MARGIN_MS;
+
+            if (timeout_ms > B2_TIMEOUT_MAX_MS)
+            {
+                timeout_ms = B2_TIMEOUT_MAX_MS;
+            }
+            cmd.type = type;
+            /* (uint16_t): amount and timeout are range-checked above. */
+            cmd.distance_mm = b_turn ? 0U : amount;
+            cmd.turn_degrees = b_turn ? amount : 0U;
+            cmd.goal_speed_mm_s = (uint16_t)speed_mm_s;
+            cmd.timeout_ms = (uint16_t)timeout_ms;
+            if (p_goal != NULL)
+            {
+                b_accepted = b2_goal_start(p_goal, &cmd);
+            }
+            else
+            {
+                b_accepted = b2_submit_command(&cmd);
+            }
+        }
+    }
+    return b_accepted;
+}
+bool b2_move_forward(uint16_t distance_mm, b2_goal_t *p_goal)
+{
+    return b2_api_goal(B2_CMD_MOVE_FORWARD, distance_mm, p_goal);
+}
+bool b2_move_backward(uint16_t distance_mm, b2_goal_t *p_goal)
+{
+    return b2_api_goal(B2_CMD_MOVE_BACKWARD, distance_mm, p_goal);
+}
+bool b2_turn_left(uint16_t angle_deg, b2_goal_t *p_goal)
+{
+    return b2_api_goal(B2_CMD_TURN_LEFT, angle_deg, p_goal);
+}
+bool b2_turn_right(uint16_t angle_deg, b2_goal_t *p_goal)
+{
+    return b2_api_goal(B2_CMD_TURN_RIGHT, angle_deg, p_goal);
 }

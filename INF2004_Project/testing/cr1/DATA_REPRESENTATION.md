@@ -88,7 +88,7 @@ The wire keeps the existing 8-bit per-subsystem `fault_mask` (bit n = subsystem 
 | tilt | 0..127 °, saturates | 7 | uint |
 | s5_fault | 7 values | 3 | enum code |
 
-Other frames: online 24 bits (3 B), heartbeat 86 bits (11 B), ACK 52 bits (7 B), event ≤ 78 bits (10 B), command 40 bits (5 B), `map` command 72 bits (9 B). Field-by-field layouts are in `tlm_codec.h`.
+Other frames: online 24 bits (3 B), heartbeat 86 bits (11 B), ACK 52 bits (7 B), event ≤ 78 bits (10 B), command 40 bits (5 B), `map` command 64 bits (8 B; was 72 bits / 9 B with 8-bit ASCII letters until 19 Nov). Field-by-field layouts are in `tlm_codec.h`.
 
 ### S1 RAM data
 
@@ -148,6 +148,10 @@ Other frames: online 24 bits (3 B), heartbeat 86 bits (11 B), ACK 52 bits (7 B),
 | `s_integral[2]` | `int32_t` | PI accumulator | 32 | unchanged | maths state, already 32-bit |
 | `s_ready`, `s_pending`, `s_*_event_pending` (5) | `bool` ×5 | 0/1 | 5 | one flags byte | R3, under `s_lock` |
 | `s_cfg` + `s2_config` | 18 B + 18 B | calibration | | `const` | R9 |
+| `s_goal_ticks[2]` (19 Nov: was one value) | `uint32_t` | 0..2³²−1 ticks | 32 | unchanged, one per wheel | compared with the 32-bit ISR counters; each wheel can have its own ticks per turn |
+| `s_straight_ref[2]` (19 Nov, new) | – | encoder counter snapshot | 32 | `uint32_t` | straight-line correction; must match the ISR counter width so the subtraction is wrap-safe. Motion task only |
+| `s_prev_speed[2]` (19 Nov, new) | – | 0..511 mm/s | 10 | `int16_t` | D term; two 10-bit fields would also need 4 B once aligned. Motion task only |
+| `b2_config_t`: `ticks_per_rev_left/right`, `kd_q8`, `straight_kp_q8`, `straight_trim_max_mm_s` (19 Nov) | – | calibration / gains | 16 each | `const`, flash | R9: no RAM |
 
 ---
 
@@ -282,7 +286,7 @@ Packing must not drop or narrow any data the specification asks for.
 
 | Item | Plan | Implemented | Why |
 |---|---|---|---|
-| App static RAM | ≈ 1,150 B | **1,122 B** (measured) | |
+| App static RAM | ≈ 1,150 B | **1,122 B** (measured; 1,138 B after B2's 19 Nov additions) | |
 | `b2_command_t` | packed, ≈ 10 B | Caller's request keeps plain types (14 B, on the caller's stack). The **shared mailbox** is packed to **8 B**. | A request is range-checked before packing, so an out-of-range value (e.g. 10,000 mm/s) is refused instead of silently truncated by a bit-field. |
 | S2 goal timeout | `uint16_t` ms | 10-bit field in 10 ms units (≤ 10.23 s, rounded up) | Fits the 8-byte mailbox. The longest timeout in use is 6 s. |
 | S2 PI integral | `int32_t` | `int16_t` | Clamped to ±8000 by the controller. |
@@ -297,4 +301,8 @@ Packing must not drop or narrow any data the specification asks for.
 | S5 small counters | unchanged | unchanged | As planned. |
 | System fault bitmask | `uint16_t app_fault_mask` with set/clear under a lock | `system_fault_mask()` builds the same 16 bits on demand from each subsystem's fault bitmask | No second copy of the faults to keep in step, and no writer, so no lock. The bit layout is the table above (`SYS_FLT_*` in `team_interfaces.h`). |
 | `vehicle_event_t` | 8 B | 8 B | 53 bits of data; 8 B once aligned. |
+| BARCODE event (MQTT), added 19 Nov | action only (3 bits) | action 3 bits + **letter 6 bits** (0 none, 1–26 A–Z, 27–36 0–9); action NONE + letter 0 = "barcode seen, not decoded". Frame 5 → 6 B | Rubric #1/#2: the decoded letter (and a failed read) must be visible on telemetry; before, an unmapped letter showed only as INVALID. The only MQTT layout change; `dashboard.py` updated, old 5-byte frames still decode. |
+| MAP command (MQTT), 19 Nov | 4 × 8-bit ASCII letters (72 bits, 9 B) | 4 × 6-bit letter codes (64 bits, **8 B**) | CR1 covers command payloads too. Same codes as the BARCODE event and S3. `dashboard.py` updated; an old 9-byte MAP is refused (BAD_LEN). |
+| `LineBarcodeData_t.scan_fail_count`, added 19 Nov | – | 2 bits in the existing spare bits (struct stays 4 B) | Counts barcode-sized scans that gave no letter. Scans end ≥ 400 ms apart and S1 reads every 200 ms, so a 2-bit wrapping counter cannot miss one. |
+| `line_status_t`, added 19 Nov | 2 B | 3 B | + letter (6 bits) + failed-scan count (2 bits). |
 

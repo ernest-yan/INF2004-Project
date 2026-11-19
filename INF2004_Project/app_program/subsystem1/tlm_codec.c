@@ -244,6 +244,10 @@ tlm_encode_event(const tlm_event_t *p_e, uint8_t *p_buf, uint32_t cap)
             break;
 
         case TLM_EVT_BARCODE:
+            bw_put_sat(&w, p_e->a, 3u);     /* action, barcode_cmd_t */
+            bw_put_sat(&w, p_e->b, 6u);     /* letter: 0 none, 1-26 A-Z, 27-36 0-9 */
+            break;
+
         case TLM_EVT_ESTOP:
             bw_put_sat(&w, p_e->a, 3u);
             break;
@@ -390,6 +394,36 @@ tlm_format_status_json(const tlm_status_t *p_s, char *p_buf, uint32_t cap)
 /* ------------------------------------------------------------------ */
 /* Commands                                                            */
 /* ------------------------------------------------------------------ */
+/* CR1: map letters travel as 6-bit codes (the same codes as S3's S3_CODE):
+ * 0 = none / not allowed, 1-26 = 'A'-'Z', 27-36 = '0'-'9'. */
+static uint32_t
+letter_to_code(char c)
+{
+    if ((c >= 'A') && (c <= 'Z'))
+    {
+        return (uint32_t) (c - 'A') + 1u;
+    }
+    if ((c >= '0') && (c <= '9'))
+    {
+        return (uint32_t) (c - '0') + 27u;
+    }
+    return 0u;
+}
+
+static char
+code_to_letter(uint32_t code)
+{
+    if ((code >= 1u) && (code <= 26u))
+    {
+        return (char) ('A' + (code - 1u));
+    }
+    if ((code >= 27u) && (code <= 36u))
+    {
+        return (char) ('0' + (code - 27u));
+    }
+    return '\0';                           /* 0 or 37-63: not a letter */
+}
+
 uint32_t
 tlm_encode_cmd(const tlm_cmd_t *p_cmd, uint8_t *p_buf, uint32_t cap)
 {
@@ -406,7 +440,7 @@ tlm_encode_cmd(const tlm_cmd_t *p_cmd, uint8_t *p_buf, uint32_t cap)
 
         for (i = 0u; i < TLM_MAP_LETTERS; i++)
         {
-            bw_put(&w, (uint8_t) p_cmd->map[i], 8u);
+            bw_put(&w, letter_to_code(p_cmd->map[i]), TLM_LETTER_BITS);
         }
     }
     return bw_finish(&w);
@@ -498,7 +532,7 @@ tlm_cmd_validate(const uint8_t *p_data, uint32_t len, uint16_t current_session,
     {
         for (i = 0u; i < TLM_MAP_LETTERS; i++)
         {
-            p_out->map[i] = (char) br_get(&r, 8u);
+            p_out->map[i] = code_to_letter(br_get(&r, TLM_LETTER_BITS));
         }
         if (!map_is_valid(p_out->map))
         {

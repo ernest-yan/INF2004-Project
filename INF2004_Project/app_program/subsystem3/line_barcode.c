@@ -366,6 +366,7 @@ void process_sensors_distance_packed(uint32_t current_ticks,
 
     uint32_t now_us = time_us_32();
     char decoded_char = '\0';
+    bool scan_failed = false;	/* a barcode-sized scan gave no letter */
 
     /*
      * Seed the edge timer from the first sample. Do not treat startup time as
@@ -432,6 +433,8 @@ void process_sensors_distance_packed(uint32_t current_ticks,
             if (decoded_char != '\0') {
                 g_last_success_decode_time = now_us;
                 g_bc.have_successful_decode = 1U;
+            } else {
+                scan_failed = true;	/* reported to S1 below */
             }
         }
 #if APP_BARCODE_ONLY
@@ -467,6 +470,9 @@ void process_sensors_distance_packed(uint32_t current_ticks,
     }
 
     g_system_data.fault_mask = line_state ? 0U : FAULT_LINE_LOSS;
+    if (scan_failed) {
+        g_system_data.scan_fail_count++;	/* 2-bit, wraps */
+    }
 
     if (out_data != NULL) {
         *out_data = g_system_data;
