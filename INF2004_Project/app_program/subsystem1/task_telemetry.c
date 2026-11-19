@@ -102,6 +102,8 @@ LOCAL void detect_events(UH session, const vehicle_status_t *p_v,
 		x.type = (uint8_t)TLM_EVT_BARCODE;
 		x.a    = p_l->last_barcode;
 		x.b    = p_l->letter_code;	/* the letter itself (rubric #2) */
+		x.scan_elems  = p_l->scan_elems;
+		x.scan_result = p_l->scan_result;
 		send_event(&x, session);
 	}
 	if (p_l->scan_fail_count != g_prev_l.scan_fail_count) {
@@ -111,6 +113,8 @@ LOCAL void detect_events(UH session, const vehicle_status_t *p_v,
 		x.type = (uint8_t)TLM_EVT_BARCODE;
 		x.a    = (uint8_t)BARCODE_NONE;
 		x.b    = 0u;
+		x.scan_elems  = p_l->scan_elems;	/* how much was seen */
+		x.scan_result = p_l->scan_result;	/* and why no letter */
 		send_event(&x, session);
 	}
 	if (p_i->hump_count != g_prev_i.hump_count) {

@@ -38,6 +38,23 @@
 #define MIN_EDGE_US    100u
 #define DECODE_COOLDOWN_US 300000u
 
+/*
+ * A finished GP16 scan is decoded (and reported to S1) once it has at least
+ * this many elements, the idle gap before the first bar included.  5 = 4
+ * bars/spaces: crossing the track line (1 bar) never counts as a scan, but a
+ * barcode the sensor only partly caught is still reported (was 9).
+ */
+#define S3_SCAN_REPORT_MIN 5u
+
+/* Outcome of the newest finished scan (LineBarcodeData_t.last_scan_result,
+   sent to the dashboard in the BARCODE event). */
+#define S3_SCAN_OK         0u	/* a letter was decoded */
+#define S3_SCAN_SHORT      1u	/* fewer elements than a full barcode (29) */
+#define S3_SCAN_NO_FRAME   2u	/* enough elements, but no '*' start AND
+				   stop character found at any offset */
+#define S3_SCAN_BAD_LETTER 3u	/* '*' frame found, but the middle nine are
+				   not a Code 39 letter (bar widths off) */
+
 #define FAULT_NONE      0x00
 #define FAULT_LINE_LOSS (1u << 0)
 
@@ -74,6 +91,8 @@ static inline char s3_code_to_char(uint32_t code)
  * S1: barcode_count / last_code keep it for readers that poll slowly
  * (S1 telemetry at 5 Hz), without taking it from mbf_barcode.
  * CR1: 6 -> 4 bytes. Read the letters with s3_code_to_char().
+ * 2026-11-19: 4 -> 5 bytes for the scan diagnosis (last_scan_*), so the
+ * dashboard can say WHY a barcode was not decoded.
  */
 typedef struct __attribute__((packed)) {
     uint8_t line_detected  : 1;
@@ -82,15 +101,21 @@ typedef struct __attribute__((packed)) {
     uint8_t ir_center_raw  : 1;
     uint8_t ir_right_raw   : 1;
     uint8_t fault_mask     : 1; /* bit 0 = FAULT_LINE_LOSS (only fault) */
-    uint8_t scan_fail_count : 2; /* S1: +1 per scan of 9+ bars/spaces that
-                                    gave no letter (barcode SEEN, not decoded);
-                                    wraps. Scans end >= 400 ms apart and S1
-                                    reads every 200 ms, so 2 bits never miss. */
+    uint8_t scan_fail_count : 2; /* S1: +1 per scan of S3_SCAN_REPORT_MIN+
+                                    elements that gave no letter (barcode
+                                    SEEN, not decoded); wraps. Scans end
+                                    >= 400 ms apart and S1 reads every
+                                    200 ms, so 2 bits never miss. */
     uint8_t scanned_code   : 6; /* S3_CODE, this call only */
     uint8_t                : 2;
     uint8_t last_code      : 6; /* S1: newest decoded letter, NONE = none yet */
     uint8_t                : 2;
     uint8_t barcode_count;      /* S1: +1 per decoded character, wraps */
+    uint8_t last_scan_elems  : 6; /* S1: bars + spaces in the newest finished
+                                     scan (decoded or not); a full barcode
+                                     is 29 */
+    uint8_t last_scan_result : 2; /* S1: S3_SCAN_OK / _SHORT / _NO_FRAME /
+                                     _BAD_LETTER for that scan */
 } LineBarcodeData_t;
 
 /* Create the kernel mutex that protects the shared data.  Call ONCE from
@@ -145,16 +170,26 @@ MovementAction_t get_action_for_character(char c);
  */
 #define S3_FOLLOW_PRI		17	/* priority band 16-17 (TEAM.md) */
 #define S3_FOLLOW_PERIOD_MS	10
-#define S3_LINE_SPEED_MM_S	70	/* both wheels, on the line (100 lost the
-					   line within 0.3 s, 2026-11-16 telemetry) */
+#define S3_LINE_SPEED_MM_S	45	/* both wheels, on the line (100 lost the
+					   line within 0.3 s, 2026-11-16 telemetry;
+					   70 wobbled on the S-curves, 2026-11-19
+					   video; 55 gave short/unclear barcode
+					   scans, 2026-11-19 dashboard).  Keep
+					   >= 40: S2 stall check */
 #define S3_STEER_SPEED_MM_S	70	/* outer wheel while steering (90 ran
 					   at 115-134 mm/s and overshot) */
 #define S3_STEER_INNER_MM_S	30	/* inner wheel while steering: a curve, not a
 					   pivot (inner = 0 overshot the line, 2026-11-13) */
-#define S3_STEER_HARD_MS	250	/* still steering the same way after this:
-					   inner wheel reverses (tight curves) */
-#define S3_STEER_HARD_MM_S	40	/* reversed inner wheel speed; S2 checks
-					   the encoder for stalls from 40 up */
+#define S3_STEER_HARD_MS	400	/* still steering the same way after this:
+					   hard turn (tight curves). Was 250 */
+#define S3_STEER_HARD_MM_S	0	/* reversed inner wheel speed in the hard
+					   turn. 0 = inner wheel stops, so the car
+					   turns about that wheel and keeps moving
+					   into the corner. Was 40 (reverse): the car
+					   spun on the spot before its wheels reached
+					   the 90 deg corner and ended up parallel to,
+					   but beside, the new line (2026-11-19 video).
+					   S2 checks for stalls only from 40 mm/s up */
 #define S3_STEER_EXIT_MS	0	/* centre found the line again after a
 					   correction: keep arcing gently that way
 					   this long (0 = off, snap straight).
@@ -162,10 +197,34 @@ MovementAction_t get_action_for_character(char c);
 					   curves (wobbles on the inside) */
 #define S3_STEER_EXIT_INNER_MM_S 50	/* inner wheel during that soft exit
 					   (outer = S3_LINE_SPEED_MM_S) */
-#define S3_SCAN_HOLD_MAX_MS	3000	/* drive straight at most this long while
-					   GP16 scans (141 mm barcode = 2 s at 70) */
+#define S3_SCAN_HOLD_MAX_MS	4500	/* drive straight at most this long while
+					   GP16 scans (141 mm barcode = 3.1 s at
+					   45; raise it if the line speed drops) */
 #define S3_TURN_SPEED_MM_S	80	/* barcode turns */
 #define S3_TURN_TIMEOUT_MS	6000
+/* A barcode turn pivots and counts lines under the centre sensor; it uses
+   no encoder angle.  Encoder turns of 90/180 deg (and later a blind
+   55/145 deg part) went past the wanted line: the real turn was ~1.7x the
+   commanded one with the provisional wheel calibration (2026-11-19 videos
+   detected_barcode_turn_overturn.mp4, IMG_2884.mp4). */
+#define S3_TURN_PIVOT_MM_S	45	/* each wheel, opposite ways (~75 deg/s
+					   measured on video). >= 40: S2's stall
+					   check stays active */
+#define S3_TURN_DEBOUNCE	3	/* loops (x S3_FOLLOW_PERIOD_MS) the centre
+					   sensor must agree before a line edge
+					   counts: tile seams and dirt ignored */
+#define S3_TURN_MIN_DEG		25	/* ignore lines until the encoders say the
+					   car has turned this far: the centre
+					   sensor can end the advance beside the
+					   line it is on and "find" that line again
+					   after a few degrees (2026-11-19 20:51 log:
+					   2 of 5 right turns ended after 0.15 s and
+					   went straight).  Only a loose gate: the
+					   encoder angle reads ~0.6x the real one
+					   with the provisional calibration, and the
+					   new line is at 90 */
+#define S3_TURN_MAX_MS		6000	/* no line found by then (a U-turn needs
+					   ~2.5 s): hand over to the normal search */
 #define S3_JUNCTION_CONFIRM_MS	40	/* both sensors on the line this long */
 #define S3_JUNCTION_ADVANCE_MM	60	/* line sensors to wheel axle: measure */
 #define S3_LINE_LOST_MS		2500	/* search this long, then stop */

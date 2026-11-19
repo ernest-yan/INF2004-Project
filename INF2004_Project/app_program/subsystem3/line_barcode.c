@@ -22,6 +22,7 @@
 #include "../test_report.h"
 #include "../app_hw.h"
 #include "../subsystem2/tkernel_adapter.h"
+#include "../subsystem2/motion_cal.h"	/* B2_CAL_TURN_TICKS_PER_DEG_X10 */
 #include "../subsystem4/tkernel_adapter.h"
 #include "../subsystem5/ultrasonic.h"
 #include "../subsystem1/subsystem1.h"	/* S1: s1_mission_go() (IF-18) */
@@ -211,19 +212,57 @@ LineBarcodeData_t get_line_barcode_data_safe(void)
     return copy;
 }
 
+/* Second smallest of the n (<= 5) values in[first], in[first + 2], ... */
+static uint32_t second_smallest(const uint32_t in[9], int first, int n)
+{
+    uint32_t lo = UINT32_MAX;
+    uint32_t lo2 = UINT32_MAX;
+
+    for (int i = 0; i < n; ++i) {
+        const uint32_t v = in[first + (2 * i)];
+        if (v < lo) {
+            lo2 = lo;
+            lo = v;
+        } else if (v < lo2) {
+            lo2 = v;
+        }
+    }
+    return lo2;
+}
+
 /*
- * Sort nine durations, estimate a narrow/wide boundary from the gap between
- * the 6th and 7th sorted values, and classify the original ordered durations.
+ * Bar-widening correction, then sort nine durations, estimate a narrow/wide
+ * boundary from the gap between the 6th and 7th sorted values, and classify
+ * the corrected ordered durations.
+ *
+ * The IR spot makes GP16 see black early and leave it late, so bars read
+ * wider and spaces narrower by the same amount (1-2 mm).  Sorted together,
+ * a widened narrow bar then matches a shrunk wide space, and the '*' frame
+ * is lost (simulated: 1.5 mm already failed most scans, 2026-11-19).  Every
+ * letter and '*' has 3 narrow bars (of 5) and 3 narrow spaces (of 4), so the
+ * middle narrow bar minus the middle narrow space is twice that offset: half
+ * of it comes off each bar and goes onto each space.  On a clean scan the
+ * offset is ~0 and nothing changes.
  *
  * A candidate is rejected if there is no separation between narrow and wide
  * durations, or if the result does not have exactly three wide elements.
  */
-static bool classify_nine(const uint32_t in[9], uint16_t *pattern_out)
+static bool classify_nine(const uint32_t raw[9], uint16_t *pattern_out)
 {
+    uint32_t in[9];
     uint32_t sorted[9];
 
     for (int i = 0; i < 9; ++i) {
-        if (in[i] == 0) return false;
+        if (raw[i] == 0) return false;
+    }
+
+    const int32_t offset = ((int32_t)second_smallest(raw, 0, 5) -
+                            (int32_t)second_smallest(raw, 1, 4)) / 2;
+
+    for (int i = 0; i < 9; ++i) {
+        const int32_t v = (int32_t)raw[i] + (((i % 2) == 0) ? -offset : offset);
+        if (v <= 0) return false;
+        in[i] = (uint32_t)v;
         sorted[i] = in[i];
     }
 
@@ -299,17 +338,19 @@ static bool classify_at(uint8_t start, uint16_t *pattern_out)
  * lookup.  Without this K/U, N/Y, O/X, Q/W, R/V and T/Z could not be told
  * apart, because each pair are mirror images of each other.
  */
-static char decode_collected_scan(void)
+static char decode_collected_scan(uint8_t *p_result)
 {
+    *p_result = (uint8_t)S3_SCAN_SHORT;
     if (g_bc.width_count < CODE39_FRAME_ELEMENTS) return '\0';
 
+    *p_result = (uint8_t)S3_SCAN_NO_FRAME;
     for (uint8_t start = 0;
          (uint16_t)start + CODE39_FRAME_ELEMENTS <= g_bc.width_count; ++start) {
         uint16_t first, letter, last;
+        bool reversed = false;
 
         if (!classify_at(start, &first) ||
-            !classify_at((uint8_t)(start + 20u), &last) ||
-            !classify_at((uint8_t)(start + 10u), &letter)) {
+            !classify_at((uint8_t)(start + 20u), &last)) {
             continue;
         }
 
@@ -318,11 +359,21 @@ static char decode_collected_scan(void)
                 reverse_9bits(last) != CODE39_STAR_PATTERN) {
                 continue;
             }
+            reversed = true;
+        }
+
+        /* Framed by '*' at both ends: from here a failure is the letter. */
+        *p_result = (uint8_t)S3_SCAN_BAD_LETTER;
+        if (!classify_at((uint8_t)(start + 10u), &letter)) {
+            continue;
+        }
+        if (reversed) {
             letter = reverse_9bits(letter);
         }
 
         char c = lookup_code39(letter);
         if (c != '\0') {
+            *p_result = (uint8_t)S3_SCAN_OK;
             return c;
         }
     }
@@ -367,6 +418,9 @@ void process_sensors_distance_packed(uint32_t current_ticks,
     uint32_t now_us = time_us_32();
     char decoded_char = '\0';
     bool scan_failed = false;	/* a barcode-sized scan gave no letter */
+    bool scan_done = false;	/* a scan was decoded this call (any result) */
+    uint8_t scan_elems = 0u;	/* its bars + spaces */
+    uint8_t scan_result = (uint8_t)S3_SCAN_OK;
 
     /*
      * Seed the edge timer from the first sample. Do not treat startup time as
@@ -423,13 +477,16 @@ void process_sensors_distance_packed(uint32_t current_ticks,
         }
     }
 #endif
-    if (g_bc.width_count >= 9 && quiet_time >= TIMEOUT_US) {
+    if (g_bc.width_count >= S3_SCAN_REPORT_MIN && quiet_time >= TIMEOUT_US) {
         bool cooldown_over = (g_bc.have_successful_decode == 0U) ||
             (uint32_t)(now_us - g_last_success_decode_time) >=
                 DECODE_COOLDOWN_US;
 
         if (cooldown_over) {
-            decoded_char = decode_collected_scan();
+            decoded_char = decode_collected_scan(&scan_result);
+            scan_done = true;
+            /* Element 0 is the idle time before the first bar. */
+            scan_elems = (uint8_t)(g_bc.width_count - 1u);
             if (decoded_char != '\0') {
                 g_last_success_decode_time = now_us;
                 g_bc.have_successful_decode = 1U;
@@ -470,6 +527,10 @@ void process_sensors_distance_packed(uint32_t current_ticks,
     }
 
     g_system_data.fault_mask = line_state ? 0U : FAULT_LINE_LOSS;
+    if (scan_done) {	/* set before either counter moves, same lock */
+        g_system_data.last_scan_elems = scan_elems;
+        g_system_data.last_scan_result = scan_result;
+    }
     if (scan_failed) {
         g_system_data.scan_fail_count++;	/* 2-bit, wraps */
     }
@@ -500,6 +561,9 @@ void process_sensors_distance_packed(uint32_t current_ticks,
  *  A decoded barcode is only stored.  Its movement runs at the next
  *  cross-junction (both sensors on the line), after driving on until the
  *  wheels are over the junction.  Then the stored letter is cleared.
+ *  The turn is a pivot that counts lines under the centre sensor (no
+ *  encoder angle): left/right stop on the first line after leaving the
+ *  current one, a U-turn passes the left branch and stops on the second.
  *
  *  S5 has priority over the wheels: nothing here moves them unless S5 is
  *  monitoring normally with no stop request.
@@ -517,7 +581,7 @@ typedef enum {
 	LF_IDLE = 0,	/* wheels stopped, waiting for a line */
 	LF_FOLLOW,
 	LF_ADVANCE,	/* driving the wheels onto the junction */
-	LF_TURN		/* the turn for the stored barcode is running */
+	LF_TURN		/* pivoting, counting lines, for the stored barcode */
 } line_follow_state_t;
 
 /* CR1: line_follow_task flags, one bit each (were BOOLs, 4 bytes each).
@@ -657,9 +721,9 @@ static void line_follow_drive(const LineBarcodeData_t *d, BOOL *line_is_left)
 			}
 		}
 		/* Gentle arc first; if the centre has not found the line again
-		   soon, reverse the inner wheel and spin almost on the spot, for
-		   curves tighter than the arc (~16 cm radius) and for s_lf.searching
-		   without driving away from the line. */
+		   soon, slow the inner wheel to -S3_STEER_HARD_MM_S (0 = stopped:
+		   turn about that wheel) for curves tighter than the arc
+		   (~16 cm radius) and for s_lf.searching. */
 		{
 			int16_t inner = S3_STEER_INNER_MM_S;
 
@@ -709,6 +773,12 @@ static void line_follow_task(INT stacd, void *exinf)
 	BOOL junction_armed = TRUE;
 	uint32_t lost_since = 0u;
 	uint32_t junction_since = 0u;
+	uint32_t turn_since = 0u;
+	BOOL turn_left_start = FALSE;	/* centre has left the starting line */
+	BOOL turn_center = FALSE;	/* debounced centre sensor */
+	uint8_t turn_debounce = 0u;
+	uint8_t turn_skip = 0u;		/* lines still to pass before stopping */
+	uint32_t turn_edges0 = 0u;	/* S2 encoder edges (L+R) at turn start */
 	BOOL on_junction = FALSE;
 	MovementAction_t action = MOVE_NONE;
 	char stored = '\0';
@@ -760,27 +830,93 @@ static void line_follow_task(INT stacd, void *exinf)
 			const b2_goal_result_t result = b2_goal_check(&goal);
 
 			if (result == B2_GOAL_DONE) {
-				if (line_follow_goal(&goal,
-				    (action == MOVE_RIGHT) ? B2_CMD_TURN_RIGHT : B2_CMD_TURN_LEFT,
-				    (action == MOVE_UTURN) ? 180U : 90U)) {
-					state = LF_TURN;
-				} else {
-					state = LF_IDLE;
-					tm_printf((UB*)"[S3] junction turn refused\n");
+				/* Wheels on the junction: pivot and count lines. */
+				state = LF_TURN;
+				turn_since = app_time_us_32();
+				turn_left_start = FALSE;
+				turn_center = TRUE;	/* assume on the line we came on */
+				turn_debounce = 0u;
+				/* A junction is only detected with the left sensor on
+				   black, so a left branch always exists; a U-turn
+				   (pivots left) passes it, then stops on the line it
+				   came in on.  Left/right stop on the first line. */
+				turn_skip = (action == MOVE_UTURN) ? 1u : 0u;
+				{
+					b2_status_t s2;
+
+					b2_get_status(&s2);
+					turn_edges0 = s2.left_encoder_edges +
+						      s2.right_encoder_edges;
 				}
 			} else if (result == B2_GOAL_FAILED) {
 				state = LF_IDLE;
 				tm_printf((UB*)"[S3] junction advance failed\n");
 			}
 		} else if (state == LF_TURN) {
-			const b2_goal_result_t result = b2_goal_check(&goal);
+			/* Sensor-only turn: no encoder angle, because the turn angle
+			   from the provisional wheel calibration was ~1.7x too large
+			   and carried the car past the line it wanted (2026-11-19
+			   videos: U-turn -> turned 270 deg, right -> turned 180 deg).
+			   Centre sensor state is debounced over S3_TURN_DEBOUNCE
+			   loops.  First wait to leave the line the car is on, then
+			   count each line the centre sensor reaches. */
+			const BOOL timed_out =
+			    ((uint32_t)(app_time_us_32() - turn_since) >=
+			     (S3_TURN_MAX_MS * 1000u)) ? TRUE : FALSE;
+			BOOL found = FALSE;
+			BOOL past_min;
+			{
+				b2_status_t s2;
 
-			if (result == B2_GOAL_DONE) {
+				/* Both wheels' edges (wrap-safe unsigned sum):
+				   a pivot of A deg is 2 * A * ticks/deg. */
+				b2_get_status(&s2);
+				past_min = ((uint32_t)(s2.left_encoder_edges +
+						       s2.right_encoder_edges -
+						       turn_edges0) * 10u >=
+					    2u * S3_TURN_MIN_DEG *
+					    B2_CAL_TURN_TICKS_PER_DEG_X10) ? TRUE : FALSE;
+			}
+
+			if ((d.ir_center_raw ? TRUE : FALSE) != turn_center) {
+				if (++turn_debounce >= S3_TURN_DEBOUNCE) {
+					turn_center = !turn_center;
+					turn_debounce = 0u;
+					if (!turn_center) {
+						turn_left_start = TRUE;
+					} else if (turn_left_start && past_min) {
+						if (turn_skip > 0u) {
+							--turn_skip;
+							tm_printf((UB*)"[S3] turn: passed a branch\n");
+						} else {
+							found = TRUE;
+						}
+					}
+				}
+			} else {
+				turn_debounce = 0u;
+			}
+
+			if (found || timed_out) {
 				state = LF_FOLLOW;
 				lost_since = app_time_us_32();
-			} else if (result == B2_GOAL_FAILED) {
-				state = LF_IDLE;
-				tm_printf((UB*)"[S3] junction turn failed\n");
+				/* Found: if the pivot carries the car past the line, it
+				   went too far the turn's way, so search back first.
+				   Timed out: the normal search sweeps both ways. */
+				line_is_left = (action == MOVE_RIGHT) ? TRUE : FALSE;
+				tm_printf((UB*)"[S3] turn: %s after %d ms of pivot\n",
+					  timed_out ? "line NOT found" : "line found",
+					  (int)((uint32_t)(app_time_us_32() -
+							   turn_since) / 1000u));
+			} else {
+				b2_command_t cmd = {0};
+				const BOOL go_left = (action != MOVE_RIGHT) ? TRUE : FALSE;
+
+				cmd.type = B2_CMD_SPEED;
+				cmd.left_mm_s = go_left ? -S3_TURN_PIVOT_MM_S
+							:  S3_TURN_PIVOT_MM_S;
+				cmd.right_mm_s = -cmd.left_mm_s;
+				(void)b2_submit_command(&cmd);
 			}
 		} else if (state == LF_FOLLOW) {
 			if (d.line_detected) {

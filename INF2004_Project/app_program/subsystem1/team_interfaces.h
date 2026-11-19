@@ -142,7 +142,10 @@ typedef struct
     uint8_t letter_code : 6; /* the decoded letter itself (S3_CODE: 1-26 = A-Z,
                                 27-36 = 0-9, 0 = none), sent in the event */
     uint8_t scan_fail_count : 2; /* +1 per barcode SEEN but not decoded, wraps */
-} line_status_t;             /* CR1: 4 -> 3 bytes (was 2 before the letter) */
+    uint8_t scan_elems : 6;  /* newest scan: bars + spaces (full barcode 29) */
+    uint8_t scan_result : 2; /* newest scan: S3_SCAN_OK/SHORT/NO_FRAME/BAD_LETTER */
+} line_status_t;             /* CR1: 4 -> 3 bytes (was 2 before the letter);
+                                4 bytes with the scan diagnosis (19 Nov) */
 
 void line_get_status(line_status_t *p_out);
 
