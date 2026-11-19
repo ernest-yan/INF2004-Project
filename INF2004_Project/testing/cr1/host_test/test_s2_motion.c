@@ -5,7 +5,7 @@
  *
  * From INF2004_Project/:
  *   gcc -std=gnu11 -Wall -Wextra testing/cr1/host_test/test_s2_motion.c \
- *       app_program/subsystem2/math.c -o test_s2 && ./test_s2
+ *       app_program/subsystem2/b2_math.c -o test_s2 && ./test_s2
  *
  * What it checks (CR1 evidence: no loss of functionality):
  *   - packed sizes of the shared structs and the mailbox

@@ -1,6 +1,6 @@
 /* IS33 Buddy 2. One motor-output owner, shared encoder IRQ dispatcher. */
 #include "motion.h"
-#include "math.h"
+#include "b2_math.h"
 #include <limits.h>
 /* PORT: no Pico SDK in this firmware (the kernel does its own start-up and the
  * SDK runtime is not linked).  Everything SDK-specific now goes through
@@ -25,7 +25,6 @@
  * core AND excludes callers on the other core (S4 urgent brake, controller). */
 static app_lock_t s_lock;
 
-#define B2_LOOP_MS            (10U)
 #define B2_MIN_TICKS          (1U)
 #define B2_STOPPED_STABLE_MS  (200U)
 #define B2_MAX_DUTY          (1000U)

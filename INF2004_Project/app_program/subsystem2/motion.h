@@ -128,7 +128,11 @@ typedef bool (*b2_event_publish_fn)(const b2_event_t *ev, void *ctx);
 bool b2_init(const b2_config_t *config, b2_event_publish_fn publish, void *ctx);
 /* GP6/GP7 rising-edge handler called by the team's SINGLE GPIO dispatcher. */
 void b2_encoder_gpio_irq(unsigned int gpio, uint32_t events);
-/* Task-only: call nominally every 10 ms, never inside an ISR. */
+/* Task-only, never inside an ISR. The motion task calls it every ~20 ms
+ * (tk_dly_tsk(S2_POLL_PERIOD_MS = 10) on the 10 ms kernel tick waits for
+ * the NEXT tick boundary after 10 ms, so one loop is two ticks). The PID
+ * I and D gains are per loop, i.e. per ~20 ms. A loop longer than 20 ms
+ * counts in b2_status_t.deadline_misses. */
 void b2_poll(void);
 /* Latest-speed command replaces older speed requests; one goal at a time. */
 bool b2_submit_command(const b2_command_t *cmd);

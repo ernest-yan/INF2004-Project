@@ -61,6 +61,36 @@ Worked example: the car drove 1,032 mm in C02, so the circumference is
 2. Record each step in [TEST_LOG.md](TEST_LOG.md): commanded value, measured value, error. Attach the console log under `logs/`.
 3. Run the host tests (`sh INF2004_Project/testing/cr1/host_test/run_host_tests.sh`). Note that the "S5 constants unchanged" checks (4429 ticks/m, 46 ticks per 10°) are expected to fail after a re-calibration: update the expected numbers in `test_s2_motion.c` to the new values.
 
+## PID tuning runs (several gain sets)
+
+The PID tuning report compares step responses for several gain sets. To
+try a set, pass it on the build command instead of editing the source
+(values are Q8: the gain × 256, whole numbers). Anything left out keeps its
+default from `app_program/subsystem2/tkernel_adapter.h` (kp 128, ki 8,
+kd 0, straight 256).
+
+```sh
+make TEST=1 NET=lwip MQTT=1 S2_CAL=1 S2_KP=192 S2_KI=8 S2_KD=32 -j8
+```
+
+| Variable | Gain | Default |
+|---|---|---|
+| `S2_KP` | P, permil of PWM per mm/s of error × 256 | 128 |
+| `S2_KI` | I, per control loop (~20 ms) × 256 | 8 |
+| `S2_KD` | D, on the measured speed, per loop × 256 | 0 |
+| `S2_SKP` | straight-line correction, mm/s per tick of L/R difference × 256 | 256 |
+
+Before the `S2-STEP` lines, the run prints `S2-GAINS,kp_q8=…,ki_q8=…,kd_q8=…,straight_kp_q8=…`,
+so every saved log records which gains it was made with. Changing the
+gains rebuilds everything (the build profile changes), and the image name
+stays the same, so flash straight after building. The demo build
+(`make NET=lwip MQTT=1`) always uses the defaults unless you pass gains,
+so once you have chosen a set, write it into `tkernel_adapter.h`.
+
+The control loop runs every **~20 ms** (`tk_dly_tsk(10)` on the 10 ms
+kernel tick), so the step log has one sample per loop at most; quote this
+period in the report, because the I and D gains are per loop.
+
 ## Why the steps are in this order
 
 The circumference only comes out right once each wheel's ticks per turn

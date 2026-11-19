@@ -19,7 +19,7 @@ echo "== S1 adapters + system fault mask =="
 $CC "$HERE/test_s1_adapters.c" -o "$OUT/s1" && "$OUT/s1" || fail=1
 
 echo "== S2 motion =="
-$CC "$HERE/test_s2_motion.c" "$PROJ/app_program/subsystem2/math.c" -o "$OUT/s2" && "$OUT/s2" || fail=1
+$CC "$HERE/test_s2_motion.c" "$PROJ/app_program/subsystem2/b2_math.c" -o "$OUT/s2" && "$OUT/s2" || fail=1
 
 echo "== S5 obstacle profile: pre-cr1 vs CR1 =="
 mkdir -p "$OUT/old"

@@ -105,6 +105,30 @@ endif
 TEST_SUFFIX := _test_s2cal
 endif
 
+# S2_KP / S2_KI / S2_KD / S2_SKP (optional) override subsystem 2's PID and
+# straight-line gains for PID tuning runs, in Q8 units (whole numbers,
+# value / 256), without editing the source. Unset = the defaults in
+# app_program/subsystem2/tkernel_adapter.h. Example:
+#   make TEST=1 NET=lwip MQTT=1 S2_CAL=1 S2_KP=192 S2_KD=32
+s2_check_gain = $(if $(shell echo '$(1)' | grep -Ex '[0-9]{1,5}'),,$(error $(2)='$(1)' must be a whole number 0-65535))
+S2_GAIN_FLAGS :=
+ifneq ($(S2_KP),)
+$(call s2_check_gain,$(S2_KP),S2_KP)
+S2_GAIN_FLAGS += -DB2_KP_Q8=$(S2_KP)U
+endif
+ifneq ($(S2_KI),)
+$(call s2_check_gain,$(S2_KI),S2_KI)
+S2_GAIN_FLAGS += -DB2_KI_Q8=$(S2_KI)U
+endif
+ifneq ($(S2_KD),)
+$(call s2_check_gain,$(S2_KD),S2_KD)
+S2_GAIN_FLAGS += -DB2_KD_Q8=$(S2_KD)U
+endif
+ifneq ($(S2_SKP),)
+$(call s2_check_gain,$(S2_SKP),S2_SKP)
+S2_GAIN_FLAGS += -DB2_STRAIGHT_KP_Q8=$(S2_SKP)U
+endif
+
 # CRASH_REPORT=1 also copies every console line to UART0 on GP0 (TX) /
 # GP1 (RX), 115200 8N1.  UART output is sent immediately, so it still shows
 # the last messages and the kernel's crash report after a crash, when the
@@ -192,6 +216,7 @@ ASFLAGS += -DCNF_SMP=1
 endif
 CFLAGS  += -DAPP_TEST=$(TEST)
 CFLAGS  += -DS2_CAL_RUN=$(S2_CAL)
+CFLAGS  += $(S2_GAIN_FLAGS)
 CFLAGS  += -DTM_CONSOLE_UART=$(CRASH_REPORT)
 ifeq ($(CRASH_REPORT),0)
 CFLAGS  += -DBOARD_UART0_FREE=1
@@ -224,7 +249,7 @@ endif
 # before any recipe executes.
 ################################################################################
 
-PROFILE_ID := smp$(SMP)-$(CONSOLE)-wifi$(WIFI)-net$(NET)-mqtt$(MQTT)-crash$(CRASH_REPORT)-test$(TEST)-s2cal$(S2_CAL)
+PROFILE_ID := smp$(SMP)-$(CONSOLE)-wifi$(WIFI)-net$(NET)-mqtt$(MQTT)-crash$(CRASH_REPORT)-test$(TEST)-s2cal$(S2_CAL)-gains$(S2_KP)_$(S2_KI)_$(S2_KD)_$(S2_SKP)
 PROFILE_FILE := .build_profile
 
 ifneq ($(strip $(shell cat $(PROFILE_FILE) 2>/dev/null)),$(PROFILE_ID))

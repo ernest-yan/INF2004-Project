@@ -13,7 +13,7 @@
  */
 
 #include "tkernel_adapter.h"
-#include "math.h"
+#include "b2_math.h"
 #include "motion_cal.h"
 #include "../test_report.h"
 
@@ -149,6 +149,10 @@ static void s2_cal_step_response(void)
 	if (!s2_cal_unlatch()) {
 		return;
 	}
+	/* Which gains this step response belongs to (Q8 values). */
+	tm_printf((UB*)"S2-GAINS,kp_q8=%u,ki_q8=%u,kd_q8=%u,straight_kp_q8=%u\n",
+		  (unsigned)B2_KP_Q8, (unsigned)B2_KI_Q8,
+		  (unsigned)B2_KD_Q8, (unsigned)B2_STRAIGHT_KP_Q8);
 	tm_printf((UB*)"S2-STEP,t_ms,left_mm_s,right_mm_s,left_pwm,"
 		  "right_pwm,left_edges,right_edges\n");
 	cmd.type = B2_CMD_SPEED;

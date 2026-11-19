@@ -26,16 +26,18 @@ static const b2_config_t s2_config = {
     .max_pwm_permil = 650U,
     .encoder_stall_ms = 500U,
     .pwm_frequency_hz = 20000U,
-    .kp_q8 = 128U,
-    .ki_q8 = 8U,
+    /* Gains: defaults in tkernel_adapter.h, overridable from the build
+       command (S2_KP / S2_KI / S2_KD / S2_SKP) for tuning runs. */
+    .kp_q8 = B2_KP_Q8,
+    .ki_q8 = B2_KI_Q8,
     /* D term: off until the tuning runs show it helps. The speed is a
        difference of encoder counts every 20 ms, so its derivative is noisy;
        S2_CAL=1 prints step responses to compare kd values. */
-    .kd_q8 = 0U,
+    .kd_q8 = B2_KD_Q8,
     /* Straight-line correction: 1 mm/s of trim per tick (~0.23 mm) that
        one wheel is ahead, at most 20 mm/s. Host-simulated with a 10 %
        weaker right motor (testing/cr1/host_test/test_s2_motion.c). */
-    .straight_kp_q8 = 256U,
+    .straight_kp_q8 = B2_STRAIGHT_KP_Q8,
     .straight_trim_max_mm_s = 20U
 };
 static ID s2_task_id;
