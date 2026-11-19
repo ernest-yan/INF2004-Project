@@ -29,17 +29,25 @@ typedef enum
     B2_EVENT_GOAL_DONE = 0, B2_EVENT_STOPPED, B2_EVENT_BRAKED,
     B2_EVENT_FAULT
 } b2_event_type_t;
+/* Robot calibration and controller gains. Constant: lives in flash. */
 typedef struct
 {
-    uint16_t ticks_per_wheel_rev;
+    uint16_t ticks_per_rev_left;    /* encoder edges per wheel turn */
+    uint16_t ticks_per_rev_right;
     uint16_t wheel_circumference_mm;
     uint16_t wheel_track_mm;
     uint16_t max_speed_mm_s;
     uint16_t max_pwm_permil;
     uint16_t encoder_stall_ms;
     uint16_t pwm_frequency_hz;
-    uint16_t kp_q8;                 /* PI: proportional gain * 256. */
-    uint16_t ki_q8;                 /* Integral per 10ms * 256. */
+    uint16_t kp_q8;                 /* PID: permil per mm/s of error * 256 */
+    uint16_t ki_q8;                 /* PID: per control loop (~20 ms) * 256 */
+    uint16_t kd_q8;                 /* PID: permil per mm/s change per loop
+                                     * * 256, on the measured speed; 0 = PI */
+    uint16_t straight_kp_q8;        /* straight-line correction: mm/s of
+                                     * set-point trim per tick of L/R
+                                     * difference * 256; 0 = off */
+    uint16_t straight_trim_max_mm_s; /* largest trim either way */
 } b2_config_t;
 /* CR1 minimum-bit representation (testing/cr1/DATA_REPRESENTATION.md).
  * Barr C forbids signed bit-fields, so signed values are stored
@@ -135,4 +143,21 @@ void b2_get_status(b2_status_t *out);
  * FAILED means it was stopped, braked or faulted before reaching its goal. */
 bool b2_goal_start(b2_goal_t *goal, const b2_command_t *cmd);
 b2_goal_result_t b2_goal_check(b2_goal_t *goal);
+
+/* Motion API in the write-up's terms (moveForward(distance),
+ * turnLeft(angle), ... ; stop() is b2_stop()). Each one starts an
+ * encoder-measured goal at a fixed speed and returns at once:
+ *   - TRUE: accepted; follow it with b2_goal_check(p_goal) if p_goal is
+ *     not NULL, or watch b2_status_t.goals_done.
+ *   - FALSE: refused, because the robot is not READY (call b2_stop()
+ *     first if it is tracking a speed), the brake is latched, or the
+ *     amount is 0 / too large to finish inside the 10.23 s goal timeout
+ *     (about 1.1 m for a move, any angle up to 360 deg for a turn).
+ * The timeout is set automatically to twice the expected time + 1 s. */
+#define B2_API_MOVE_SPEED_MM_S  (120U)
+#define B2_API_TURN_SPEED_MM_S  (80U)
+bool b2_move_forward(uint16_t distance_mm, b2_goal_t *p_goal);
+bool b2_move_backward(uint16_t distance_mm, b2_goal_t *p_goal);
+bool b2_turn_left(uint16_t angle_deg, b2_goal_t *p_goal);
+bool b2_turn_right(uint16_t angle_deg, b2_goal_t *p_goal);
 #endif

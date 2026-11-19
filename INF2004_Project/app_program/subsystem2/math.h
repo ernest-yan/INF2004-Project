@@ -4,6 +4,8 @@
 /* All distances in millimetres. Encoder scale is PROVISIONAL until measured. */
 uint32_t b2_mm_to_ticks(uint32_t mm, uint32_t ticks_per_rev,
                         uint32_t circumference_mm);
+/* Arc length (mm) each wheel travels in an on-the-spot turn. */
+uint32_t b2_turn_to_mm(uint32_t turn_deg, uint32_t track_width_mm);
 uint32_t b2_turn_to_ticks(uint32_t turn_deg, uint32_t track_width_mm,
                           uint32_t ticks_per_rev, uint32_t circumference_mm);
 int32_t b2_ticks_to_mm(uint32_t ticks, uint32_t ticks_per_rev,

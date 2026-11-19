@@ -148,6 +148,10 @@ Other frames: online 24 bits (3 B), heartbeat 86 bits (11 B), ACK 52 bits (7 B),
 | `s_integral[2]` | `int32_t` | PI accumulator | 32 | unchanged | maths state, already 32-bit |
 | `s_ready`, `s_pending`, `s_*_event_pending` (5) | `bool` ×5 | 0/1 | 5 | one flags byte | R3, under `s_lock` |
 | `s_cfg` + `s2_config` | 18 B + 18 B | calibration | | `const` | R9 |
+| `s_goal_ticks[2]` (19 Nov: was one value) | `uint32_t` | 0..2³²−1 ticks | 32 | unchanged, one per wheel | compared with the 32-bit ISR counters; each wheel can have its own ticks per turn |
+| `s_straight_ref[2]` (19 Nov, new) | – | encoder counter snapshot | 32 | `uint32_t` | straight-line correction; must match the ISR counter width so the subtraction is wrap-safe. Motion task only |
+| `s_prev_speed[2]` (19 Nov, new) | – | 0..511 mm/s | 10 | `int16_t` | D term; two 10-bit fields would also need 4 B once aligned. Motion task only |
+| `b2_config_t`: `ticks_per_rev_left/right`, `kd_q8`, `straight_kp_q8`, `straight_trim_max_mm_s` (19 Nov) | – | calibration / gains | 16 each | `const`, flash | R9: no RAM |
 
 ---
 
@@ -282,7 +286,7 @@ Packing must not drop or narrow any data the specification asks for.
 
 | Item | Plan | Implemented | Why |
 |---|---|---|---|
-| App static RAM | ≈ 1,150 B | **1,122 B** (measured) | |
+| App static RAM | ≈ 1,150 B | **1,122 B** (measured; 1,138 B after B2's 19 Nov additions) | |
 | `b2_command_t` | packed, ≈ 10 B | Caller's request keeps plain types (14 B, on the caller's stack). The **shared mailbox** is packed to **8 B**. | A request is range-checked before packing, so an out-of-range value (e.g. 10,000 mm/s) is refused instead of silently truncated by a bit-field. |
 | S2 goal timeout | `uint16_t` ms | 10-bit field in 10 ms units (≤ 10.23 s, rounded up) | Fits the 8-byte mailbox. The longest timeout in use is 6 s. |
 | S2 PI integral | `int32_t` | `int16_t` | Clamped to ±8000 by the controller. |

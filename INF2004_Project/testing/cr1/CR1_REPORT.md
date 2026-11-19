@@ -11,11 +11,11 @@ Week 13 evidence for Change Requirement 1. Branch `cr1/min-bit`; the "before" bu
 
 ## Summary
 
-- **Application RAM: 1,589 → 1,122 bytes (−467 B, −29 %).** Every subsystem went down.
+- **Application RAM: 1,589 → 1,138 bytes (−451 B, −28 %).** Every subsystem went down. (1,122 B at the CR1 commit; +16 B on 19 Nov for B2's per-wheel calibration and straight-line correction, see the note under §1.)
 - **Inter-task messages are 25–50 % smaller.** For example, the S5 obstacle event went from 32 to 20 B and the S2 command mailbox from 16 to 8 B.
 - **MQTT payloads are compact binary.** A status frame is 21 B, against 257 B for the same data as JSON text (8 %). This was already true before the change (Buddy 1's codec), so the wire format is unchanged.
 - **One system-wide fault bitmask** gives each fault its own bit: motor stall, IMU fault, no echo, Wi-Fi loss and so on.
-- **No loss of functionality on the host.** For S3, S4 and S5, the pre-CR1 and CR1 code were run side by side on the same simulated sensor input and gave identical results. S1 and S2 have new unit tests. In total over 200,000 simulated cases and about 1,200 unit checks pass.
+- **No loss of functionality on the host.** For S3, S4 and S5, the pre-CR1 and CR1 code were run side by side on the same simulated sensor input and gave identical results. S1 and S2 have new unit tests. In total over 200,000 simulated cases and about 2,100 unit checks pass.
 - **Timing has not been measured on the car yet.** The checklist is in §4.
 
 ## 1. RAM usage
@@ -25,18 +25,20 @@ Measured with `arm-none-eabi-size` / `nm` on the demo build (`make NET=lwip MQTT
 | Subsystem | Before (B) | After (B) | Change |
 |---|---:|---:|---:|
 | S1 Telemetry / MQTT | 409 | 378 | −31 (−8 %) |
-| S2 Motion | 263 | 142 | −121 (−46 %) |
+| S2 Motion | 263 | 158 ¹ | −105 (−40 %) |
 | S3 Line + barcode | 316 | 167 | −149 (−47 %) |
 | S4 IMU / terrain | 278 | 206 | −72 (−26 %) |
 | S5 Ultrasonic / servo | 323 | 229 | −94 (−29 %) |
-| **Application total** | **1,589** | **1,122** | **−467 (−29 %)** |
+| **Application total** | **1,589** | **1,138** ¹ | **−451 (−28 %)** |
 
 S1's remaining 378 B is mostly the 289 B raw MQTT receive buffer, which is a byte stream with nothing to pack.
 
 | Whole image | Before | After | Change |
 |---|---:|---:|---:|
-| RAM (`data` + `bss`) | 84,256 | 83,768 | −488 |
-| Flash (`text`) | 369,349 | 371,729 | +2,380 (+0.6 %) |
+| RAM (`data` + `bss`) | 84,256 | 83,780 ¹ | −476 |
+| Flash (`text`) | 369,349 | 372,437 ¹ | +3,088 (+0.8 %) |
+
+¹ Re-measured on 19 Nov after B2's task-list additions (branch `buddy2/motion-tasks`). At the CR1 commit S2 was 142 B, the application 1,122 B, the image 83,768 B RAM / 371,729 B flash. The additions are new functions, not a loss of packing: the goal tick count became one per wheel (+4 B, each wheel can have its own ticks per turn), the straight-line correction keeps the encoder counts at the start of a straight (+8 B, full 32-bit words like the ISR counters they are subtracted from), and the D term keeps last loop's speed per wheel (+4 B, two `int16_t`: two 10-bit fields would also take 4 B once aligned). Rows in [DATA_REPRESENTATION.md](DATA_REPRESENTATION.md), S2.
 
 Most of the whole-image RAM belongs to the network stack, the Wi-Fi driver and the kernel, which are outside this change. Flash grows slightly because reading and writing bit-fields takes extra shift and mask instructions. Trading a little flash for RAM is the expected cost of this change.
 
@@ -102,7 +104,7 @@ The script rebuilds the pre-CR1 code from tag `pre-cr1` automatically, so each o
 |---|---|---|
 | S1 | Existing codec test (wire format unchanged) | PASS |
 | S1 | [test_s1_adapters.c](host_test/test_s1_adapters.c): real `team_adapters.c`. Every fault sets exactly its own system-mask bit, the MQTT fault byte follows the pre-CR1 rules, values saturate at their field width instead of wrapping, barcode letters map to the right movement, and the letter and "seen, not decoded" count reach S1 | 109/109 checks |
-| S2 | [test_s2_motion.c](host_test/test_s2_motion.c): real `motion.c` with a simulated clock and encoder ISR. Covers packing at every range edge, refusing out-of-range requests (never truncating), MOVE goal distance and speed, the 32-bit clock wrapping mid-run, stall fault and reset, emergency brake latch, odometry saturation, and every lock released | 1,093/1,093 checks |
+| S2 | [test_s2_motion.c](host_test/test_s2_motion.c): real `motion.c` with a simulated clock and encoder ISR. Covers packing at every range edge, refusing out-of-range requests (never truncating), MOVE goal distance and speed, the 32-bit clock wrapping mid-run, stall fault and reset, emergency brake latch, odometry saturation, and every lock released. Since 19 Nov also B2's additions on a simple motor model (deadband, lag, 10 % weaker right motor): straight-line correction (27 → 1 tick of drift over 5 s), per-wheel calibration, D term stability, the move/turn API, and S5's tick constants unchanged | 1,974/1,974 checks (1,093 at the CR1 commit) |
 | S3 | [s3_driver.c](host_test/s3_driver.c): old vs new `line_barcode.c` on 3,000 simulated Code 39 scans (random letter, speed, narrow:wide ratio, ±25 % jitter, both directions, damaged scans), plus the barcode map | **Identical**: 2,927 decoded, all correct, none wrong. All 73 undecoded scans reported as "seen, not decoded" |
 | S1 + dashboard | [barcode_event_enc.c](host_test/barcode_event_enc.c) + [test_barcode_event.py](host_test/test_barcode_event.py): every letter A–Z, 0–9, plus "seen, not decoded" and INVALID, encoded by the C codec and decoded by the real `dashboard.py`; old 5-byte events still decode | 82/82 checks |
 | S4 | [s4_driver.c](host_test/s4_driver.c): old vs new `imu.c`/`terrain.c`/`posture.c` on 12 simulated runs: calibrate, drive, hump, turn, **lifted → motors stopped**, reset, **overturned → motors stopped**, I2C fault | **Identical**: 2,074 status/event lines, 12 humps, 24 lift/overturn stops, locks balanced |

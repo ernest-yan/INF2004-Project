@@ -10,22 +10,13 @@
  * owning task configures its peripherals.
  */
 #include "tkernel_adapter.h"
-
-/* PROVISIONAL: calibrate on the assembled robot before enabling motion. */
-#ifndef B2_CAL_TICKS_PER_WHEEL_REV
-#define B2_CAL_TICKS_PER_WHEEL_REV       (930U)	/* measured 2026-11-08: 10 hand turns, L 962 / R 896 per turn */
-#endif
-#ifndef B2_CAL_WHEEL_CIRCUMFERENCE_MM
-#define B2_CAL_WHEEL_CIRCUMFERENCE_MM   (210U)
-#endif
-#ifndef B2_CAL_WHEEL_TRACK_MM
-#define B2_CAL_WHEEL_TRACK_MM           (120U)
-#endif
+#include "motion_cal.h"	/* measured calibration: the one place it lives */
 
 /* CR1 (R9): calibration is constant, so it lives in flash. b2_init keeps a
    pointer to it instead of a RAM copy. */
 static const b2_config_t s2_config = {
-    .ticks_per_wheel_rev = B2_CAL_TICKS_PER_WHEEL_REV,
+    .ticks_per_rev_left = B2_CAL_TICKS_PER_REV_LEFT,
+    .ticks_per_rev_right = B2_CAL_TICKS_PER_REV_RIGHT,
     .wheel_circumference_mm = B2_CAL_WHEEL_CIRCUMFERENCE_MM,
     .wheel_track_mm = B2_CAL_WHEEL_TRACK_MM,
     /* Also the feedforward scale: ff = max_pwm * request / max_speed.  At 150
@@ -36,7 +27,16 @@ static const b2_config_t s2_config = {
     .encoder_stall_ms = 500U,
     .pwm_frequency_hz = 20000U,
     .kp_q8 = 128U,
-    .ki_q8 = 8U
+    .ki_q8 = 8U,
+    /* D term: off until the tuning runs show it helps. The speed is a
+       difference of encoder counts every 20 ms, so its derivative is noisy;
+       S2_CAL=1 prints step responses to compare kd values. */
+    .kd_q8 = 0U,
+    /* Straight-line correction: 1 mm/s of trim per tick (~0.23 mm) that
+       one wheel is ahead, at most 20 mm/s. Host-simulated with a 10 %
+       weaker right motor (testing/cr1/host_test/test_s2_motion.c). */
+    .straight_kp_q8 = 256U,
+    .straight_trim_max_mm_s = 20U
 };
 static ID s2_task_id;
 static volatile BOOL s2_hw_ready = FALSE;

@@ -168,7 +168,7 @@ sends to it or waits on it. Agree on the data format before coding.
 |---|---|---|---|---|---|
 | IF-01 | S3 → S3 | message buffer (owned by S3) | `mbf_barcode` | 1 byte per decoded Code 39 character ('A'–'Z'); `line_follow_task` receives with `tk_rcv_mbf` | |
 | IF-02 | S5 → VC | message buffer (owned by S5) | `mbf_s5_events` | one `subsystem5_event_t` per STOP_REQUIRED / PROFILE_READY / FAULT; the VC must keep draining it | |
-| IF-03 | VC, S3, S5 → S2 | function API (`motion.h`) | — | `b2_stop()`, `b2_submit_command()`, `b2_goal_start()`, `b2_goal_check()`, `b2_get_status()`; lock-protected, any task/core | |
+| IF-03 | VC, S3, S5 → S2 | function API (`motion.h`) | — | `b2_stop()`, `b2_submit_command()`, `b2_goal_start()`, `b2_goal_check()`, `b2_get_status()`; since 19 Nov also `b2_move_forward()`, `b2_move_backward()`, `b2_turn_left()`, `b2_turn_right()` (write-up API names; fixed speed, automatic timeout). Lock-protected, any task/core. S5's bypass tick scales come from S2's `motion_cal.h` | |
 | IF-04 | S4 → S2 | function call | — | `b2_emergency_brake()` when the robot is lifted or overturned, or on an IMU fault (latched until `b2_authorized_reset_while_stopped()`) | |
 | IF-05 | S2 → S4 | function call | — | `imu_task` reads `b2_get_status()` odometry and feeds `b4_update_travel_mm()` | |
 | IF-06 | VC → S5 | function call | — | `subsystem5_confirm_robot_stopped()` once the encoders are quiet for 100 ms | |

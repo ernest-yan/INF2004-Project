@@ -6,13 +6,21 @@ uint32_t b2_mm_to_ticks(uint32_t mm, uint32_t tpr, uint32_t circ)
     const uint64_t result = (((uint64_t)mm * tpr) + (circ / 2U)) / circ;
     return (result > UINT32_MAX) ? UINT32_MAX : (uint32_t)result;
 }
+uint32_t b2_turn_to_mm(uint32_t turn_deg, uint32_t track_width_mm)
+{
+    /* In-place differential turn: each wheel follows pi*track*deg/360,
+     * pi = 31416 / 10000, rounded to the nearest mm. */
+    const uint64_t length_mm =
+        (((uint64_t)track_width_mm * turn_deg * 31416ULL) + 1800000ULL) /
+        3600000ULL;
+
+    /* (uint32_t): track and angle are 16-bit, so the arc fits 32 bits. */
+    return (uint32_t)length_mm;
+}
 uint32_t b2_turn_to_ticks(uint32_t deg, uint32_t track, uint32_t tpr,
                           uint32_t circ)
 {
-    /* In-place differential turn: each wheel follows pi*track*deg/360. */
-    const uint64_t length_mm =
-        (((uint64_t)track * deg * 31416ULL) + 1800000ULL) / 3600000ULL;
-    return b2_mm_to_ticks((uint32_t)length_mm, tpr, circ);
+    return b2_mm_to_ticks(b2_turn_to_mm(deg, track), tpr, circ);
 }
 int32_t b2_ticks_to_mm(uint32_t ticks, uint32_t tpr, uint32_t circ)
 {
