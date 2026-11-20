@@ -124,6 +124,9 @@ typedef struct
     uint8_t  type;              /* 4 bits, tlm_event_type_t */
     uint8_t  a;
     uint8_t  b;
+    uint8_t  scan_elems;        /* BARCODE: 6 bits, bars + spaces scanned */
+    uint8_t  scan_result;       /* BARCODE: 2 bits, 0 ok 1 short 2 no '*'
+                                   frame 3 bad letter */
     uint16_t obs_nearest_cm;    /* 9 bits */
     uint8_t  obs_centre_deg;    /* 8 bits, 0..180 */
     uint8_t  obs_width_cm;      /* 8 bits */

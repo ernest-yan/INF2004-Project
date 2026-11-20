@@ -99,10 +99,11 @@ int main(void)
 {
     /* sizes of the packed team structs */
     CHECK(sizeof(vehicle_status_t) == 2U);
-    CHECK(sizeof(line_status_t) == 3U);     /* + letter, seen-not-decoded */
+    CHECK(sizeof(line_status_t) == 4U);     /* + letter, seen-not-decoded, scan diagnosis */
+    CHECK(sizeof(LineBarcodeData_t) == 5U); /* S3: + last_scan_elems/result */
     CHECK(sizeof(motion_status_t) == 8U);
     CHECK(sizeof(imu_status_t) == 10U);
-    CHECK(sizeof(ultra_status_t) == 8U);
+    CHECK(sizeof(ultra_status_t) == 16U);  /* 20 Nov: + bypass step, raw_cm[5] (13 B, 4-aligned) */
     CHECK(sizeof(S1_STATS) == 8U);
 
     /* no fault */
@@ -222,10 +223,14 @@ int main(void)
         }
     }
     g_l.scan_fail_count = 3U;
+    g_l.last_scan_elems = 59U;          /* most a scan can hold (60 - idle) */
+    g_l.last_scan_result = S3_SCAN_BAD_LETTER;
     {
         line_status_t l;
         line_get_status(&l);
         CHECK(l.scan_fail_count == 3U);
+        CHECK(l.scan_elems == 59U);     /* scan diagnosis reaches S1 intact */
+        CHECK(l.scan_result == S3_SCAN_BAD_LETTER);
     }
     for (char c = 'A'; c <= 'Z'; c++) { CHECK(s3_code_to_char(s3_char_to_code(c)) == c); }
     for (char c = '0'; c <= '9'; c++) { CHECK(s3_code_to_char(s3_char_to_code(c)) == c); }

@@ -45,17 +45,31 @@ $S3CC -I"$PROJ/app_program/subsystem3" "$HERE/s3_driver.c" -o "$OUT/s3_new"
 scans=$(grep -c '^scan' "$OUT/s3_new.txt")
 decoded=$(grep '^scan' "$OUT/s3_new.txt" | grep -vc -- '-> -$' || true)
 right=$(grep '^scan' "$OUT/s3_new.txt" | awk '{if ($3 == $NF) n++} END {print n+0}')
-if diff "$OUT/s3_old.txt" "$OUT/s3_new.txt" > "$OUT/s3_diff.txt"; then
-    echo "S3: $scans simulated scans, old and new decoders give IDENTICAL results ($decoded decoded, $right correct letter); maps identical"
+wrong=$((decoded - right))
+old_right=$(grep '^scan' "$OUT/s3_old.txt" | awk '{if ($3 == $NF) n++} END {print n+0}')
+# 2026-11-19: the decoder now corrects bar widening (IR spot), so its letters
+# no longer have to match pre-cr1 scan for scan.  It must never decode a
+# WRONG letter; the movement maps must still be identical.
+grep -v '^scan' "$OUT/s3_old.txt" > "$OUT/s3_old_maps.txt"
+grep -v '^scan' "$OUT/s3_new.txt" > "$OUT/s3_new_maps.txt"
+if [ "$wrong" -ne 0 ]; then
+    echo "S3: new decoder gave $wrong WRONG letters:"; grep '^scan' "$OUT/s3_new.txt" | awk '$NF != "-" && $3 != $NF' | head -20; fail=1
+elif diff "$OUT/s3_old_maps.txt" "$OUT/s3_new_maps.txt" > "$OUT/s3_diff.txt"; then
+    echo "S3: $scans simulated scans: $right correct letter, 0 wrong (pre-cr1: $old_right correct); maps identical"
     undecoded=$(grep '^scan' "$OUT/s3_new.txt" | grep -c -- '-> -$' || true)
     seen=$(sed -n 's/failed-scan events: //p' "$OUT/s3_new_err.txt")
     if [ "$seen" = "$undecoded" ]; then
         echo "S3: every undecoded scan reported as 'seen, not decoded' ($seen of $undecoded)"
+        diag=$(sed -n 's/scan diagnosis wrong: //p' "$OUT/s3_new_err.txt")
+        case "$diag" in
+            "0 "*) echo "S3: every scan reports its result and element count ${diag#0 }" ;;
+            *) echo "S3: scan diagnosis wrong: $diag"; fail=1 ;;
+        esac
     else
         echo "S3: 'seen, not decoded' count $seen != undecoded scans $undecoded"; fail=1
     fi
 else
-    echo "S3: old and new decoders DIFFER:"; head -20 "$OUT/s3_diff.txt"; fail=1
+    echo "S3: barcode -> movement maps DIFFER:"; head -20 "$OUT/s3_diff.txt"; fail=1
 fi
 
 echo "== S4 IMU (lift / overturn / hump): pre-cr1 vs CR1 =="

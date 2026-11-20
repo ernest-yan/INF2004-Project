@@ -307,6 +307,8 @@ void line_get_status(line_status_t *p_out)
 	p_out->last_barcode  = barcode_cmd(s3_code_to_char(d.last_code));
 	p_out->letter_code   = d.last_code;
 	p_out->scan_fail_count = d.scan_fail_count;
+	p_out->scan_elems    = d.last_scan_elems;
+	p_out->scan_result   = d.last_scan_result;
 }
 
 void imu_get_status(imu_status_t *p_out)

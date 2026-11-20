@@ -93,6 +93,8 @@ static uint32_t rnd(uint32_t n)
 static char g_last_decoded;
 static unsigned g_fail_events;      /* CR1 build: scan_fail_count changes */
 static unsigned g_prev_fail;
+static unsigned g_diag_bad;         /* 19 Nov build: scan result/count wrong */
+static unsigned g_diag_why[4];      /* failed scans per S3_SCAN_* result */
 static void step_until(uint32_t t_us)
 {
     while (g_now_us < t_us)
@@ -103,6 +105,17 @@ static void step_until(uint32_t t_us)
         process_sensors_distance_packed(0U, &d);
 #ifdef S3_CODE_NONE
         if (d.scanned_code != S3_CODE_NONE) { g_last_decoded = s3_code_to_char(d.scanned_code); }
+#ifdef S3_SCAN_OK
+        /* A decoded scan must say OK with a full barcode's elements; a
+           failed one must give a reason. */
+        if (d.scanned_code != S3_CODE_NONE &&
+            (d.last_scan_result != S3_SCAN_OK || d.last_scan_elems < 29U)) { g_diag_bad++; }
+        if (d.scan_fail_count != g_prev_fail)
+        {
+            if (d.last_scan_result == S3_SCAN_OK) { g_diag_bad++; }
+            g_diag_why[d.last_scan_result]++;
+        }
+#endif
         if (d.scan_fail_count != g_prev_fail)
         {
             g_fail_events += (d.scan_fail_count - g_prev_fail) & 3U;
@@ -186,5 +199,9 @@ int main(void)
         printf(" nul=%d\n", (int)get_action_for_character('\0'));
     }
     fprintf(stderr, "failed-scan events: %u\n", g_fail_events);
+#ifdef S3_SCAN_OK
+    fprintf(stderr, "scan diagnosis wrong: %u (failed: %u short, %u no frame, %u bad letter)\n",
+            g_diag_bad, g_diag_why[1], g_diag_why[2], g_diag_why[3]);
+#endif
     return 0;
 }

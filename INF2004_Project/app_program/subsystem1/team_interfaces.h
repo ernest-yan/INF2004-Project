@@ -142,7 +142,10 @@ typedef struct
     uint8_t letter_code : 6; /* the decoded letter itself (S3_CODE: 1-26 = A-Z,
                                 27-36 = 0-9, 0 = none), sent in the event */
     uint8_t scan_fail_count : 2; /* +1 per barcode SEEN but not decoded, wraps */
-} line_status_t;             /* CR1: 4 -> 3 bytes (was 2 before the letter) */
+    uint8_t scan_elems : 6;  /* newest scan: bars + spaces (full barcode 29) */
+    uint8_t scan_result : 2; /* newest scan: S3_SCAN_OK/SHORT/NO_FRAME/BAD_LETTER */
+} line_status_t;             /* CR1: 4 -> 3 bytes (was 2 before the letter);
+                                4 bytes with the scan diagnosis (19 Nov) */
 
 void line_get_status(line_status_t *p_out);
 
@@ -171,8 +174,8 @@ typedef struct
     uint32_t nearest_cm : 9;  /* 0..511 (0x1FF = no echo) */
     uint32_t clear_l_cm : 9;  /* 0..400 */
     uint32_t clear_r_cm : 9;
-    uint32_t bypass_phase : 3; /* 0 none, 1 out, 2 pass, 3 return, 4 align,
-                                  5 back up (kept after a bypass FAULT) */
+    uint32_t bypass_phase : 3; /* 0 none, 1 out, 2 pass, 3 return, 4 align, 5 turn, 6 look
+                                  (kept after a bypass FAULT) */
     uint32_t : 2;
     uint8_t  obstacle_state : 3; /* MONITOR..REVERSE, 8 values */
     uint8_t  fault : 3;       /* subsystem5_fault_t, 7 values */
@@ -183,7 +186,7 @@ typedef struct
     uint8_t  width_cm;
     uint8_t  raw_cm[5];       /* 20 Nov: last coarse scan 30..150 deg (cm;
                                  254 open, 255 no echo), diagnostics */
-} ultra_status_t;             /* CR1: 14 -> 8 bytes */
+} ultra_status_t;             /* CR1: 14 -> 8 bytes; 20 Nov: 16 (+ raw_cm[5]) */
 
 void ultra_get_status(ultra_status_t *p_out);
 

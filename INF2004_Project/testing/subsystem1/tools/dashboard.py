@@ -15,10 +15,10 @@ obstacle, link health, the last ACK and event, and plain-language warnings
 are typed at the bottom as before. --no-panel gives the old scrolling output.
 Needs a window at least 21 rows tall; otherwise it falls back automatically.
 
-Barcode letters: the car reports the action (LEFT, U-TURN...) AND the letter
-it decoded, plus "seen, not decoded" when a barcode passed the sensor but no
-letter came out. Older firmware sent only the action; for that, the
-dashboard looks the letter up in the map the car ACCEPTED (see 'help').
+Barcodes: every scan is shown on its own "Scans" rows: the letter and the
+action the map gives it, or for a scan with no letter, how many bars+spaces
+were seen and why it failed (see 'help'). The map is re-sent after a car
+reboot (--map FULR sets it from the start).
 
 Keep the field tables below in sync with app_program/subsystem1/tlm_codec.c
 and app_program/subsystem1/MQTT_PROTOCOL.md.
@@ -64,6 +64,17 @@ BC_INVALID = BARCODE.index("INVALID")
 # in the map the car accepted.
 MAP_POS = {3: 0, 4: 1, 1: 2, 2: 3}
 MAP_ROLE = ["forward", "U-turn", "left", "right"]
+# BARCODE event scan diagnosis (S3_SCAN_* in line_barcode.h): why a scan
+# did or did not give a letter, and how many bars + spaces it counted.
+FULL_BARCODE = 29                 # '*' gap letter gap '*' = 9+1+9+1+9
+SCAN_RESULT = ["decoded", "too short", "no * frame", "bad letter"]
+SCAN_WHY = {
+    "too short": "too short: fewer than {full} bars+spaces (part of the barcode "
+                 "missed: sensor off the barcode, or it was crossed at an angle)",
+    "no * frame": "no '*' start/stop found (bar widths unclear: speed change, "
+                  "sensor height, merged/split bars)",
+    "bad letter": "'*' found but the letter bars are unreadable (bar widths off)",
+}
 EVT_SRC = ["button", "laptop", "IMU lift/overturn", "motion", "ultrasonic", "line"]
 # subsystem4/motion_class.h (b4_motion_t) and posture.h (b4_lift_cause_t)
 MOTION = ["CALIBRATING", "STATIONARY", "MOVING", "TURNING", "ON_HUMP", "LIFTED",
@@ -74,23 +85,24 @@ SPEED_MAX, OBS_CM_MAX = (1 << 10) - 1, (1 << 9) - 1           # field saturation
 
 # Printed at start-up (short form) and by the 'help' command (full form).
 BARCODE_HELP = """\
-Barcode letters
-  The car reports the action AND the decoded letter ('A' -> LEFT), also for a
-  letter that is not in the map, and "SEEN, not decoded" when a barcode passed
-  the sensor without giving a letter.
-  Older firmware sent only the action. Then the dashboard looks the letter up
-  in the map the car ACCEPTED ('map FULR' = forward, U-turn, left, right):
-    Barcode row : 'F' LEFT instead of just LEFT, plus the map in use
-    Event row   : BARCODE 'F' -> LEFT each time a barcode is read
-    CSV log     : each BARCODE event gets "letter": "F" and "letter_from": "map"
-    INVALID     : no letter (a letter that isn't in the map can't be named)
-Limits
-  - The map must be sent while THIS dashboard is running (from here or another
-    laptop): only maps whose ACCEPTED reply it saw are known. A map sent before
-    it started is unknown, and barcodes then show the action with no letter.
-  - After the car reboots the dashboard clears the map, because the car forgets
-    it too. Send 'map' again.
-  - Changes to dashboard.py only apply to a newly started dashboard window."""
+Barcode scans (the "Scans" rows keep the last 3; every one is also printed
+as a [BARCODE] line and logged in the CSV with a "summary")
+  'A' -> LEFT  (30/29 bars+spaces)   decoded, and what the map makes of it
+  'X' NOT in the map                 decoded, but the map has no 'X': the car
+                                     goes straight on
+  SEEN, no letter (14/29 ...): why   the sensor saw bars but no letter came out:
+     too short   under 29 bars+spaces: part of the barcode was missed
+     no * frame  enough bars, but no '*' start/stop: bar widths unclear
+                 (speed changed mid-scan, sensor height, merged/split bars)
+     bad letter  '*' found at both ends, but the letter bars are unreadable
+  Firmware before 19 Nov 2026 sends no count or reason (and older still, no
+  letter: then the letter is looked up in the map the car ACCEPTED).
+The map
+  'map FULR' = F forward, U U-turn, L left, R right. The car forgets it on
+  every reboot; this dashboard re-sends the last accepted map (or --map) when
+  the car comes back with a new session. --no-auto-map turns that off.
+  Only maps whose ACCEPTED reply this dashboard saw are known.
+  Changes to dashboard.py only apply to a newly started dashboard window."""
 
 # (field name, bits) in wire order, after the 28-bit header.
 STATUS_FIELDS = [("vehicle_state", 3), ("estop", 1), ("line", 2), ("barcode", 3),
@@ -127,8 +139,44 @@ def letter_from_code(code: int):
 
 
 def describe_map(letters: str) -> str:
-    """'BCFR' -> 'B=forward C=U-turn F=left R=right'."""
-    return " ".join(f"{c}={role}" for c, role in zip(letters, MAP_ROLE))
+    """'ABCD' -> 'A = forward, B = U-turn, C = left, D = right'."""
+    return ", ".join(f"{c} = {role}" for c, role in zip(letters, MAP_ROLE))
+
+
+def map_table(letters: str) -> str:
+    """'ABCD' -> one 'letter = action' line each, for the scrolling output."""
+    rows = [f"           {c} = {role}" for c, role in zip(letters, MAP_ROLE)]
+    return "\n".join(rows + ["           any other letter = go straight on"])
+
+
+def describe_barcode(d: dict, map_letters=None):
+    """One BARCODE event -> (text, colour): the letter, what the map makes of
+    it, and for a scan that gave no letter, how much was seen and why."""
+    v = d.get("value")
+    action = BARCODE[v] if v is not None and v < len(BARCODE) else f"?{v}"
+    n = d.get("elements")
+    seen = "" if n is None else f"{n}/{FULL_BARCODE} bars+spaces"
+    if d.get("seen_not_decoded"):
+        why = SCAN_WHY.get(d.get("scan_result"), "").format(full=FULL_BARCODE)
+        text = "SEEN, no letter"
+        if seen:
+            text += f" ({seen})"
+        if why:
+            text += f": {why}"
+        elif n is None:
+            text += " (older firmware: no reason sent)"
+        return text, RED
+    letter = d.get("letter")
+    if letter is None and map_letters and v in MAP_POS:
+        letter = map_letters[MAP_POS[v]]
+    tail = "" if n is None else f"  ({n} bars+spaces)"
+    if v == BC_INVALID:
+        name = f"'{letter}'" if letter else "a letter"
+        mapped = f"map {map_letters}" if map_letters else "no map sent"
+        return f"{name} NOT in the map ({mapped}): car goes straight on{tail}", YELLOW
+    if letter is None:
+        return f"{action} (letter unknown: older firmware, no map known){tail}", YELLOW
+    return f"'{letter}' -> {action}{tail}", GREEN
 
 
 class BitReader:
@@ -209,6 +257,11 @@ def decode_event(data: bytes) -> dict:
                 d["letter"] = letter
             elif d["value"] == 0:
                 d["seen_not_decoded"] = True    # scan seen, no letter
+            # 19 Nov firmware: scan result (2) + bars/spaces counted (6).
+            # A 6-byte frame has only 7 padding bits left, so never matches.
+            if r.remaining() >= 8:
+                d["scan_result"] = SCAN_RESULT[r.get(2)]
+                d["elements"] = r.get(6)
     elif etype == 3:
         d["height_mm"] = r.get(8)
     elif etype == 4:
@@ -281,7 +334,8 @@ class Panel:
     commands are typed at the bottom as before. Uses plain ANSI escapes, so
     it needs no extra packages (Windows Terminal, PowerShell, Linux, macOS).
     """
-    HEIGHT = 16                       # rows the panel occupies (4 for warnings)
+    HEIGHT = 19                       # rows the panel occupies (4 for warnings)
+    SCAN_ROWS = 3                     # newest barcode scans kept on screen
     STALE_S = 1.5                     # status older than this = link problem
     STILL_S = 2.0                     # encoder unchanged this long = not turning
 
@@ -302,6 +356,12 @@ class Panel:
         self.map_letters = None     # map the car accepted, e.g. "BCFR"
         self.lost_map = None        # map the car had before it rebooted
         self.unnamed_barcode = False  # a barcode was read with no map known
+        self.map_sent = None          # map typed, car's ACK not here yet
+        # (time, text, colour) per BARCODE event, newest last. Kept on its own
+        # rows: the Event row is overwritten by the next STATE_CHANGE within
+        # a second while line following, so a barcode there is easy to miss.
+        self.scans = deque(maxlen=self.SCAN_ROWS)
+        self.scan_total = 0
 
     # ---- data in (called from the MQTT thread) ----
     def on_status(self, d, now):
@@ -339,8 +399,15 @@ class Panel:
 
     def on_map(self, letters):
         self.map_letters = letters
+        self.map_sent = None
         self.lost_map = None
         self.unnamed_barcode = False
+
+    def on_map_sent(self, letters):
+        self.map_sent = letters       # shown until the car's ACK arrives
+
+    def on_map_refused(self):
+        self.map_sent = None
 
     def letter_for(self, bc):
         """Letter for a barcode action, from the accepted map (None if unknown)."""
@@ -358,6 +425,9 @@ class Panel:
                 self.last_letter = d["letter"]
             elif d.get("value") in MAP_POS:
                 self.unnamed_barcode = True
+            text, colour = describe_barcode(d, self.map_letters)
+            self.scans.append((now, text, colour))
+            self.scan_total += 1
         if d["type"] == "ESTOP":
             v = d.get("value", 0)
             self.estop_src = EVT_SRC[v] if v < len(EVT_SRC) else f"source {v}"
@@ -514,12 +584,28 @@ class Panel:
         elif bc == BC_INVALID:
             bc_txt = (f"'{self.last_letter}' INVALID (not in map)" if self.last_letter
                       else "INVALID (not in map)")
-        if self.map_letters:
-            map_seg = [("map ", DIM), (f"{self.map_letters:<6}", GREEN)]
+        if self.map_sent and self.map_sent != self.map_letters:
+            map_seg = [("map ", DIM), (describe_map(self.map_sent), YELLOW),
+                       ("  (sent, waiting for the car)", DIM)]
+        elif self.map_letters:
+            map_seg = [("map ", DIM), (describe_map(self.map_letters), GREEN)]
         elif self.lost_map:
-            map_seg = [("map ", DIM), ("lost  ", YELLOW)]
+            map_seg = [("map ", DIM), (f"LOST on reboot (was {self.lost_map})", YELLOW)]
         else:
-            map_seg = [("map ", DIM), ("none  ", DIM)]
+            map_seg = [("map ", DIM), ("none: every barcode = go straight", YELLOW)]
+
+        scan_rows = []
+        for i in range(self.SCAN_ROWS):
+            label = "Scans     " if i == 0 else "          "
+            k = len(self.scans) - 1 - i             # newest first
+            if k < 0:
+                text = (f"none yet ({self.scan_total} total)" if i == 0 else "")
+                scan_rows.append([(label, DIM), (text, DIM)])
+                continue
+            t, text, colour = self.scans[k]
+            stamp = time.strftime("%H:%M:%S", time.localtime(t))
+            scan_rows.append([(label, DIM), (f"{stamp} ", DIM), (text, colour)]
+                             + ([(f"  [{self.scan_total} total]", DIM)] if i == 0 else []))
         pitch = g("pitch", None)
         pitch_txt = "-" if pitch is None else f"{pitch:+d} deg"
         yaw = g("yaw_dps", None)
@@ -548,16 +634,8 @@ class Panel:
             v = info.get("value")
             if d["type"] == "ESTOP" and v is not None:
                 info = f" by {EVT_SRC[v] if v < len(EVT_SRC) else v}"
-            elif d["type"] == "BARCODE" and d.get("seen_not_decoded"):
-                info = " SEEN, not decoded (no letter)"
-            elif d["type"] == "BARCODE" and v is not None:
-                info = f" {BARCODE[v] if v < len(BARCODE) else v}"
-                if "letter" in d:
-                    info = f" '{d['letter']}' ->{info}"
-                elif v == BC_INVALID:
-                    info += " (letter not in map)"
-                elif v in MAP_POS:
-                    info += " (no letter: no map known)"
+            elif d["type"] == "BARCODE":
+                info = " " + describe_barcode(d, self.map_letters)[0]
             elif d["type"] == "STATE_CHANGE":
                 info = f" {info['from']} -> {info['to']}"
             else:
@@ -571,10 +649,11 @@ class Panel:
             [("Faults    ", DIM)] + fault_seg,
             [("Wheels    ", DIM)] + wheel("l", "L") + [("|  ", DIM)] + wheel("r", "R"),
             [("Line      ", DIM)] + line_seg,
-            [("Barcode   ", DIM), (f"{bc_txt:<22}", "")] + map_seg
-            + [("Travel ", DIM), (f"{g('dist_cm')} cm", "")],
+            [("Barcode   ", DIM), (f"{bc_txt:<22}", "")] + map_seg,
+        ] + scan_rows + [
             [("Tilt      ", DIM), (f"pitch {pitch_txt:<9}", ""), ("hump max ", DIM),
-             (f"{g('hump_max_mm')} mm", "")],
+             (f"{g('hump_max_mm')} mm   ", ""), ("travel ", DIM),
+             (f"{g('dist_cm')} cm", "")],
             [("Motion    ", DIM), (f"{motion_name:<14}",
                                     RED if motion_name in ("LIFTED", "OVERTURNED") else ""),
              ("turn ", DIM), (f"{yaw_txt:<12}", ""),
@@ -663,6 +742,10 @@ class Dashboard:
         self.sent_at = {}                 # seq -> send time, for round-trip time
         self.map_pending = {}             # seq -> letters of a MAP not yet ACKed
         self.map_letters = None           # map the car accepted (letter lookup)
+        # Map to keep on the car: --map, then the last one it accepted. The
+        # car forgets its map on every reboot, so it is re-sent each time a
+        # new session comes online (unless --no-auto-map).
+        self.want_map = args.map
         self.lock = threading.Lock()
         self.out_lock = threading.Lock()  # one writer at a time on the terminal
         self.panel = Panel(self.out_lock) if args.panel else None
@@ -718,14 +801,22 @@ class Dashboard:
         try:
             if msg.topic == T_ONLINE:
                 d = decode_online(msg.payload)
-                lost = None
+                lost, new_session = None, False
                 with self.lock:
                     if d["online"] and d["session"] != self.session:
                         self.session, self.next_seq = d["session"], self.first_seq()
                         lost, self.map_letters = self.map_letters, None  # rebooted car forgot the map
+                        new_session = True
                 self.to_panel("on_online", d)
                 self.say(f"[online] {'ONLINE' if d['online'] else 'OFFLINE'} "
                       f"session=0x{d['session']:04X}")
+                resend = self.want_map if self.args.auto_map else None
+                if new_session and resend:
+                    self.write_log(msg.topic, msg.payload, d)
+                    self.say(f"[dash] new car session: sending map {resend} "
+                             f"({describe_map(resend)}) automatically")
+                    self.send("map", letters=resend)
+                    return
                 if lost:
                     self.say(f"[dash] car rebooted: map {lost} forgotten, barcode "
                              f"letters unknown until you send 'map {lost}' again")
@@ -754,26 +845,29 @@ class Dashboard:
             elif msg.topic == T_EVENT:
                 d = decode_event(msg.payload)
                 v = d.get("value")
-                note = ""
-                if d["type"] == "BARCODE" and d.get("seen_not_decoded"):
-                    note = "  (a barcode passed the sensor but no letter was decoded)"
-                elif d["type"] == "BARCODE" and "letter" not in d:
-                    if self.map_letters and v in MAP_POS:
-                        d["letter"] = self.map_letters[MAP_POS[v]]   # from the map
+                if d["type"] == "BARCODE":
+                    if ("letter" not in d and not d.get("seen_not_decoded")
+                            and self.map_letters and v in MAP_POS):
+                        d["letter"] = self.map_letters[MAP_POS[v]]   # older firmware
                         d["letter_from"] = "map"
-                    elif v == BC_INVALID:
-                        note = "  (INVALID: the letter isn't in the map, so it can't be named)"
-                    elif v in MAP_POS:
-                        note = ("  (no letter: no accepted map seen since this dashboard "
-                                "started -- send 'map FULR')")
-                self.to_panel("on_event", d, time.time())
-                self.say(f"[EVENT] {d}{note}")
+                    text, _ = describe_barcode(d, self.map_letters)
+                    d["summary"] = text                 # also in the CSV log
+                    self.to_panel("on_event", d, time.time())
+                    self.say(f"[BARCODE] {text}")
+                else:
+                    self.to_panel("on_event", d, time.time())
+                    self.say(f"[EVENT] {d}")
             elif msg.topic == T_ACK:
                 d = decode_ack(msg.payload)
                 letters = self.map_pending.pop(d["cmd_seq"], None)
-                if letters and d["cmd"] == CMD["map"] and RESULT[d["result"]] == "ACCEPTED":
+                accepted = (letters and d["cmd"] == CMD["map"]
+                            and RESULT[d["result"]] == "ACCEPTED")
+                if accepted:
                     self.map_letters = letters
+                    self.want_map = letters       # re-sent after a reboot
                     self.to_panel("on_map", letters)
+                elif letters and d["cmd"] == CMD["map"]:
+                    self.to_panel("on_map_refused")
                 sent = self.sent_at.pop(d["cmd_seq"], None)
                 rtt = f"{(time.time() - sent) * 1000:.0f} ms" if sent else "n/a"
                 d["rtt_ms"] = None if sent is None else round((time.time() - sent) * 1000, 1)
@@ -781,13 +875,15 @@ class Dashboard:
                               RESULT[d["result"]], rtt)
                 self.say(f"[ACK] {CMD_NAME.get(d['cmd'], d['cmd'])} seq={d['cmd_seq']} "
                       f"-> {RESULT[d['result']]} (round trip {rtt})")
-                if letters and self.map_letters == letters:
-                    self.say(f"[dash] map in use: {describe_map(letters)} "
-                             f"(barcode letters now shown)")
+                if accepted:
+                    self.say(f"[dash] car ACCEPTED map {letters}, now in use:\n"
+                             f"{map_table(letters)}")
                 elif letters and d["cmd"] == CMD["map"]:
+                    kept = (f"the car keeps map {self.map_letters} "
+                            f"({describe_map(self.map_letters)})" if self.map_letters
+                            else "the car has no map: every barcode = go straight on")
                     self.say(f"[dash] map {letters} NOT accepted ({RESULT[d['result']]}): "
-                             f"the car keeps its old map; barcode letters not shown. "
-                             f"Send 'map {letters}' again.")
+                             f"{kept}. Send 'map {letters}' again.")
             elif msg.topic == T_CMD:
                 # Commands from ANY dashboard (ours echoed back too): note a
                 # MAP so its letters are known when the car ACKs it.
@@ -817,6 +913,7 @@ class Dashboard:
         self.sent_at[seq] = time.time()
         if name == "map":
             self.map_pending[seq] = letters     # applied when the car ACKs it
+            self.to_panel("on_map_sent", letters)
         # Commands are NEVER retained, so the broker never replays them.
         self.client.publish(T_CMD, payload, qos=1, retain=False)
         self.write_log("sent_cmd", payload, {"cmd": name, "session": session, "seq": seq,
@@ -839,8 +936,12 @@ class Dashboard:
         self.say("Commands: start | stop | e (E-STOP) | reset | map FULR (forward, U-turn, "
               "left, right) | stale (old-session START) | replay (repeat last seq) | "
               "burst N (N STARTs fast) | help (barcode letters + limits) | q")
-        self.say("Barcode letters come from the map the car ACCEPTED while this "
-                 "dashboard runs; after a car reboot send 'map' again. Type 'help' for more.")
+        if self.want_map and self.args.auto_map:
+            self.say(f"Map {self.want_map} ({describe_map(self.want_map)}) is sent when the "
+                     f"car is online and again after every reboot. Type 'help' for barcodes.")
+        else:
+            self.say("Send 'map FULR' once: it is re-sent automatically after a car "
+                     "reboot. Type 'help' for barcodes.")
         try:
             for line in sys.stdin:
                 parts = line.strip().lower().split()
@@ -859,6 +960,8 @@ class Dashboard:
                             or len(set(letters)) != 4):
                         self.say("map needs 4 different letters/digits, e.g. map FULR")
                     else:
+                        self.say(f"[dash] map {letters} -> sending to the car:\n"
+                                 f"{map_table(letters)}")
                         self.send("map", letters=letters)
                 elif cmd in ("e", "estop"):
                     self.send("estop")
@@ -895,7 +998,15 @@ def main():
                    help="plain scrolling output instead of the live status panel")
     p.add_argument("--clear-retained", action="store_true",
                    help="erase any retained message on the command topic")
+    p.add_argument("--map", type=str.upper, metavar="FULR",
+                   help="barcode map (forward, U-turn, left, right) to send as soon "
+                        "as the car is online and again after every car reboot")
+    p.add_argument("--no-auto-map", dest="auto_map", action="store_false",
+                   help="do not re-send the map automatically after a car reboot")
     args = p.parse_args()
+    if args.map and (len(args.map) != 4 or not set(args.map) <= MAP_CHARS
+                     or len(set(args.map)) != 4):
+        p.error("--map needs 4 different letters/digits, e.g. --map FULR")
     if args.panel and not Panel.supported():
         print("[dash] terminal can't show the live panel (not a console, or under "
               f"{Panel.HEIGHT + 6} rows); using plain output")

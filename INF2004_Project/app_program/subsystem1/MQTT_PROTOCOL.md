@@ -111,7 +111,7 @@ Fields 15–19 were appended later. A decoder that finds fewer bits (an older 17
 | Type | Value | Payload | Total |
 |---|---:|---|---|
 | STATE_CHANGE | 1 | from state (3), to state (3) | 38 bits, 5 B |
-| BARCODE | 2 | action (3, §4.2), **letter (6)**: 0 none, 1–26 = A–Z, 27–36 = 0–9. Action NONE + letter 0 = **barcode seen but not decoded** | 41 bits, 6 B |
+| BARCODE | 2 | action (3, §4.2), **letter (6)**: 0 none, 1–26 = A–Z, 27–36 = 0–9. Action NONE + letter 0 = **barcode seen but not decoded**. Then **scan result (2)**: 0 decoded, 1 too short (under 29 bars + spaces), 2 no `*` start/stop frame, 3 framed but the middle is not a letter; and **elements (6)**: bars + spaces the sensor counted (a full barcode is 29) | 49 bits, 7 B |
 | HUMP | 3 | height of the completed hump, mm (8) | 40 bits, 5 B |
 | OBSTACLE | 4 | nearest cm (9), centre angle ° (8), width cm (8), left clearance cm (9), right clearance cm (9), chosen side (3: 0 none, 1 left, 2 right) | 78 bits, 10 B |
 | LIFTED | 5 | cause (2): 1 lifted, 2 overturned | 34 bits, 5 B |
@@ -126,6 +126,8 @@ When each event is sent: on a change seen by the 5 Hz status task.
 - **OBSTACLE:** S5 measured a new obstacle profile.
 
 **Older BARCODE events:** firmware before 19 Nov 2026 sent BARCODE without the letter (5 B). Those frames have only 5 padding bits after the action, so a decoder that needs 6 more bits for a letter correctly finds none.
+
+**Scan diagnosis (19 Nov 2026, 7 B):** every finished GP16 scan of 4 or more bars + spaces is reported, decoded or not, with its result and element count, so the dashboard can show why a barcode gave no letter. A 6 B frame (letter, no diagnosis) leaves only 7 padding bits, fewer than the 8 the diagnosis needs, so a decoder correctly finds none.
 
 ### 3.6 ACK (`is33/car/ack`, one per command): 52 bits = 7 B
 
