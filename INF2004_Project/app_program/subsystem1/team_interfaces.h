@@ -171,7 +171,9 @@ typedef struct
     uint32_t nearest_cm : 9;  /* 0..511 (0x1FF = no echo) */
     uint32_t clear_l_cm : 9;  /* 0..400 */
     uint32_t clear_r_cm : 9;
-    uint32_t : 5;
+    uint32_t bypass_phase : 3; /* 0 none, 1 out, 2 pass, 3 return, 4 align,
+                                  5 back up (kept after a bypass FAULT) */
+    uint32_t : 2;
     uint8_t  obstacle_state : 3; /* MONITOR..REVERSE, 8 values */
     uint8_t  fault : 3;       /* subsystem5_fault_t, 7 values */
     uint8_t  decision : 2;    /* S5 candidate side: 0 none, 1 left, 2 right */
@@ -179,6 +181,8 @@ typedef struct
                                  also when no bypass follows; wraps */
     uint8_t  centre_deg;
     uint8_t  width_cm;
+    uint8_t  raw_cm[5];       /* 20 Nov: last coarse scan 30..150 deg (cm;
+                                 254 open, 255 no echo), diagnostics */
 } ultra_status_t;             /* CR1: 14 -> 8 bytes */
 
 void ultra_get_status(ultra_status_t *p_out);

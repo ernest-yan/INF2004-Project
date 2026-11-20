@@ -19,10 +19,10 @@
 
 /* Encoded frame sizes in bytes (bits rounded up to whole bytes). */
 #define TLM_ONLINE_LEN          (3u)    /*  24 bits */
-#define TLM_STATUS_LEN          (21u)   /* 166 bits */
+#define TLM_STATUS_LEN          (22u)   /* 169 bits (20 Nov: + S5 bypass step) */
 #define TLM_HEARTBEAT_LEN       (11u)   /*  86 bits */
 #define TLM_ACK_LEN             (7u)    /*  52 bits */
-#define TLM_EVENT_MAX_LEN       (10u)   /*  78 bits, obstacle profile */
+#define TLM_EVENT_MAX_LEN       (15u)   /* 118 bits, obstacle profile + raw scan (20 Nov) */
 #define TLM_CMD_LEN             (5u)    /*  40 bits */
 #define TLM_CMD_MAP_LEN         (8u)    /*  64 bits: header + 4 x 6-bit letters */
 #define TLM_MAP_LETTERS         (4u)    /* forward, U-turn, left, right */
@@ -84,6 +84,9 @@ typedef struct
     uint16_t up_speed_mm_s;     /* 8 bits, sent as value / 4: 0..1020 mm/s */
     uint8_t  tilt_deg;          /* 7 bits, 0..127, saturates */
     uint8_t  s5_fault;          /* 3 bits, subsystem5_fault_t */
+    uint8_t  s5_phase;          /* 3 bits (22-byte frame): S5 bypass step,
+                                   0 none, 1 out, 2 pass, 3 return, 4 align,
+                                   5 back up */
 } tlm_status_t;
 
 /* ---------- Heartbeat frame (car -> dashboard, 1 Hz) ---------- */
@@ -127,6 +130,7 @@ typedef struct
     uint16_t obs_clear_l_cm;    /* 9 bits */
     uint16_t obs_clear_r_cm;    /* 9 bits */
     uint8_t  obs_decision;      /* 3 bits */
+    uint8_t  obs_raw_cm[5];     /* 5 x 8 bits (20 Nov): coarse scan 30..150 */
 } tlm_event_t;
 
 /* ---------- Encoders: return bytes written, 0 if buffer too small ---------- */

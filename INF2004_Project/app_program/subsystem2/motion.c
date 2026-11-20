@@ -559,10 +559,15 @@ static void b2_start_command(const b2_cmd_packed_t *cmd, uint32_t tick_l,
     s_requested[0] = (int16_t)request[0];   /* |request| <= 511 */
     s_requested[1] = (int16_t)request[1];
     /* A wheel held at 0 (steering) has old encoder edges: give it the full
-     * stall window again when it restarts, or it reads as stalled at once. */
+     * stall window again when it restarts, or it reads as stalled at once.
+     * 19 Nov: the same when it is asked to change direction. It has to
+     * slow down through 0 first, sending no edges, and S5's pivots (one
+     * wheel from +100 to -80 mm/s) tripped ENCODER_STALL and latched the
+     * brake in every bypass that day. */
     for (uint32_t i = 0U; i < 2U; ++i)
     {
-        if ((previous[i] == 0) && (s_requested[i] != 0))
+        if ((s_requested[i] != 0) &&
+            ((previous[i] == 0) || ((previous[i] < 0) != (s_requested[i] < 0))))
         {
             s_wheel_started_us[i] = now;
         }
