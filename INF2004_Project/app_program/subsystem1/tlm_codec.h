@@ -86,7 +86,7 @@ typedef struct
     uint8_t  s5_fault;          /* 3 bits, subsystem5_fault_t */
     uint8_t  s5_phase;          /* 3 bits (22-byte frame): S5 bypass step,
                                    0 none, 1 out, 2 pass, 3 return, 4 align,
-                                   5 back up */
+                                   5 turn on the spot, 6 look */
 } tlm_status_t;
 
 /* ---------- Heartbeat frame (car -> dashboard, 1 Hz) ---------- */

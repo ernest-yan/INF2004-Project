@@ -114,7 +114,8 @@ STATUS_FIELDS_2 = [("yaw_dps", 9), ("motion", 3)]
 # Lift-detection signals (21-byte frame): upward speed / 4 mm/s, total tilt.
 STATUS_FIELDS_3 = [("up_speed", 8), ("tilt", 7), ("s5_fault", 3)]
 # S5 bypass step (22-byte frame, 20 Nov): 0 none, 1 out, 2 pass, 3 return,
-# 4 align, 5 back up. Kept after a bypass fault, so the log shows where.
+# 4 align, 5 turn on the spot, 6 look for the line. Kept after a bypass
+# fault, so the log shows where.
 STATUS_FIELDS_4 = [("s5_phase", 3)]
 S5_PHASE = ["", "out", "pass", "return", "align", "turn", "look"]
 # subsystem5/ultrasonic.h (subsystem5_fault_t)
