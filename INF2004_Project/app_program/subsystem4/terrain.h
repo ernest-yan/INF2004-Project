@@ -45,8 +45,8 @@ typedef struct
     float pitch_deg;           /* extra low-pass on the caller's pitch. */
     float max_pitch_deg;       /* most nose-up this hump. */
     float min_pitch_deg;       /* most nose-down this hump. */
-    /* CR1: every travel counter is <= ~700 mm (a hump longer than
-       B4_HUMP_MAX_PATH_MM = 600 mm is dropped and re-armed), so 16 bits;
+    /* CR1: every travel counter is <= ~1100 mm (a hump longer than
+       B4_HUMP_MAX_PATH_MM = 1000 mm is dropped and re-armed), so 16 bits;
        sample counters saturate at 255 (largest threshold is 100);
        heights saturate at 255 mm (B4_MAX_HUMP_MM is 150). */
     uint16_t path_mm;          /* travel since the hump started. */

@@ -32,7 +32,10 @@ static const b4_config_t s4_config = {
     .lift_accel_mg = 250U,
     /* A hand lift is 200-500 mm/s; a hump at line speed is ~20 mm/s. */
     .lift_speed_mm_s = 150U,
-    .lift_tilt_deg = 30U,
+    /* Was 30: the 50 mm demo hump can tilt the car asin(50/96) = 31 deg
+       and would latch LIFTED (brake, run over). 38 keeps a margin and is
+       still below a 40 deg carry (S4-U07). */
+    .lift_tilt_deg = 38U,
     .overturn_tilt_deg = 60U,
     .wheel_track_mm = S4_WHEEL_TRACK_MM,
     .wheelbase_mm = S4_WHEELBASE_MM,

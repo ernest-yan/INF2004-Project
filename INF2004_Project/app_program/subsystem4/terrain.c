@@ -6,7 +6,8 @@
 #include "mathf.h"   /* PORT: replaces <math.h> (no libm linked) */
 #include <string.h>
 
-/* PROVISIONAL: the course hump (10 mm over 200 mm) tilts the car ~4.4 deg. */
+/* All units mm. Demo hump (23 Nov) is 50 mm high: it tilts the car
+   ~20-30 deg, far above the start threshold. */
 #define B4_HUMP_START_DEG      (2.0f)   /* tilt that may be a hump */
 #define B4_HUMP_START_SAMPLES  (8U)     /* 80 ms tilted, while moving */
 #define B4_HUMP_PHASE_MM       (30U)    /* a solid half: tilted over 30 mm of
@@ -14,7 +15,9 @@
                                            tilts the car over ~10 mm. */
 #define B4_HUMP_CLEAR_MM       (80U)    /* travel with no clear tilt = done */
 #define B4_HUMP_STILL_SAMPLES  (100U)   /* or stopped 1 s after both phases */
-#define B4_HUMP_MAX_PATH_MM    (600U)   /* longer = a ramp or noise */
+#define B4_HUMP_MAX_PATH_MM    (1000U)  /* longer = a ramp or noise. Was 600:
+                                           a long 50 mm hump + wheelbase +
+                                           80 mm clear could pass 600. */
 #define B4_MIN_HUMP_MM         (3.0f)
 #define B4_MAX_HUMP_MM         (150.0f)
 #define B4_PITCH_ALPHA         (0.1f)   /* +100 ms smoothing at 100 Hz */

@@ -214,7 +214,7 @@ EXPORT void subsystem4_test(void)
 
 	/* Same thresholds as subsystem4_init(). Level robot: gravity on +Z. */
 	{
-		const b4_posture_cfg_t c = {250U, 150U, 30U, 60U};
+		const b4_posture_cfg_t c = {250U, 150U, 38U, 60U};
 		b4_posture_t p;
 		b4_lift_cause_t r;
 		int first;
@@ -267,7 +267,7 @@ EXPORT void subsystem4_test(void)
 	   a(t) = 57 mg * sin(2 pi t / 1.5 s), 150 samples at 10 ms.
 	   sin() is a parabola approximation: good enough for a test. */
 	{
-		const b4_posture_cfg_t c = {250U, 150U, 30U, 60U};
+		const b4_posture_cfg_t c = {250U, 150U, 38U, 60U};
 		b4_posture_t p;
 		b4_lift_cause_t r = B4_LIFT_NONE;
 		int i, first = 0;
@@ -291,7 +291,7 @@ EXPORT void subsystem4_test(void)
 	   40 ms: must NOT read as a lift. Same parabola "sine" as S4-U11,
 	   upside down (down first, then the stop). */
 	{
-		const b4_posture_cfg_t c = {250U, 150U, 30U, 60U};
+		const b4_posture_cfg_t c = {250U, 150U, 38U, 60U};
 		b4_posture_t p;
 		int i, first = 0;
 
