@@ -193,6 +193,7 @@ tlm_encode_status(const tlm_status_t *p_s, uint8_t *p_buf, uint32_t cap)
     bw_put_sat(&w, (uint32_t) p_s->up_speed_mm_s / UP_SPEED_STEP, 8u);
     bw_put_sat(&w, p_s->tilt_deg, 7u);
     bw_put_sat(&w, p_s->s5_fault, 3u);
+    bw_put_sat(&w, p_s->s5_phase, 3u);
     return bw_finish(&w);
 }
 
@@ -265,6 +266,13 @@ tlm_encode_event(const tlm_event_t *p_e, uint8_t *p_buf, uint32_t cap)
             bw_put_sat(&w, p_e->obs_clear_l_cm, 9u);
             bw_put_sat(&w, p_e->obs_clear_r_cm, 9u);
             bw_put_sat(&w, p_e->obs_decision, 3u);
+            {
+                uint32_t k;
+
+                for (k = 0u; k < 5u; k++) {
+                    bw_put(&w, p_e->obs_raw_cm[k], 8u);
+                }
+            }
             break;
 
         case TLM_EVT_LIFTED:
@@ -386,7 +394,8 @@ tlm_format_status_json(const tlm_status_t *p_s, char *p_buf, uint32_t cap)
     jw_field(&j, "motion", (int32_t) p_s->motion, false);
     jw_field(&j, "up_speed", (int32_t) p_s->up_speed_mm_s, false);
     jw_field(&j, "tilt", (int32_t) p_s->tilt_deg, false);
-    jw_field(&j, "s5_fault", (int32_t) p_s->s5_fault, true);
+    jw_field(&j, "s5_fault", (int32_t) p_s->s5_fault, false);
+    jw_field(&j, "s5_phase", (int32_t) p_s->s5_phase, true);
     jw_char(&j, '}');
 
     p_buf[j.len] = '\0';

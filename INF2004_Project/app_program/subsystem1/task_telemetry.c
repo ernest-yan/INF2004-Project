@@ -138,6 +138,13 @@ LOCAL void detect_events(UH session, const vehicle_status_t *p_v,
 		x.obs_clear_l_cm = p_u->clear_l_cm;
 		x.obs_clear_r_cm = p_u->clear_r_cm;
 		x.obs_decision   = p_u->decision;
+		{
+			uint32_t k;
+
+			for (k = 0u; k < 5u; k++) {
+				x.obs_raw_cm[k] = p_u->raw_cm[k];
+			}
+		}
 		send_event(&x, session);
 	}
 }
@@ -181,6 +188,7 @@ LOCAL void send_status(UH session)
 	s.up_speed_mm_s   = i.up_speed_mm_s;
 	s.tilt_deg        = i.tilt_deg;
 	s.s5_fault        = u.fault;
+	s.s5_phase        = u.bypass_phase;
 
 #if TLM_USE_JSON_STATUS
 	{

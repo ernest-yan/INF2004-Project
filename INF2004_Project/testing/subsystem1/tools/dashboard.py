@@ -113,6 +113,11 @@ STATUS_FIELDS = [("vehicle_state", 3), ("estop", 1), ("line", 2), ("barcode", 3)
 STATUS_FIELDS_2 = [("yaw_dps", 9), ("motion", 3)]
 # Lift-detection signals (21-byte frame): upward speed / 4 mm/s, total tilt.
 STATUS_FIELDS_3 = [("up_speed", 8), ("tilt", 7), ("s5_fault", 3)]
+# S5 bypass step (22-byte frame, 20 Nov): 0 none, 1 out, 2 pass, 3 return,
+# 4 align, 5 turn on the spot, 6 look for the line. Kept after a bypass
+# fault, so the log shows where.
+STATUS_FIELDS_4 = [("s5_phase", 3)]
+S5_PHASE = ["", "out", "pass", "return", "align", "turn", "look"]
 # subsystem5/ultrasonic.h (subsystem5_fault_t)
 S5_FAULT = ["", "sensor not answering", "scan invalid", "car did not stop",
             "event lost", "no safe side to pass", "bypass blocked/failed"]
@@ -121,6 +126,8 @@ HEARTBEAT_FIELDS = [("uptime_s", 16), ("rssi_neg", 7), ("link", 3), ("cmds_ok", 
 ACK_FIELDS = [("cmd_seq", 16), ("cmd", 4), ("result", 4)]
 OBSTACLE_FIELDS = [("nearest_cm", 9), ("centre_deg", 8), ("width_cm", 8),
                    ("clear_l_cm", 9), ("clear_r_cm", 9), ("decision", 3)]
+# 20 Nov: raw coarse scan, cm at 30/60/90/120/150 deg (254 open, 255 no echo).
+OBSTACLE_FIELDS_2 = [("raw30", 8), ("raw60", 8), ("raw90", 8), ("raw120", 8), ("raw150", 8)]
 
 
 def letter_from_code(code: int):
@@ -213,6 +220,8 @@ def decode_status(data: bytes) -> dict:
     if r.nbits - r.pos >= sum(bits for _, bits in STATUS_FIELDS_3):
         d.update(r.fields(STATUS_FIELDS_3))
         d["up_speed"] *= 4                # sent as mm/s / 4
+    if r.nbits - r.pos >= sum(bits for _, bits in STATUS_FIELDS_4):
+        d.update(r.fields(STATUS_FIELDS_4))
     return d
 
 
@@ -258,6 +267,8 @@ def decode_event(data: bytes) -> dict:
         d["height_mm"] = r.get(8)
     elif etype == 4:
         d.update(r.fields(OBSTACLE_FIELDS))
+        if r.nbits - r.pos >= sum(bits for _, bits in OBSTACLE_FIELDS_2):
+            d.update(r.fields(OBSTACLE_FIELDS_2))
     elif etype == 5:
         c = r.get(2)
         d["cause"] = LIFT_CAUSE[c] if c < len(LIFT_CAUSE) else f"?{c}"
@@ -466,6 +477,9 @@ class Panel:
         if s.get("obs_state") == OBS_STATE.index("FAULT"):
             f5 = s.get("s5_fault")
             why = S5_FAULT[f5] if f5 is not None and 0 < f5 < len(S5_FAULT) else None
+            ph = s.get("s5_phase")
+            if why and ph and 0 < ph < len(S5_PHASE):
+                why += f" during '{S5_PHASE[ph]}'"
             w.append((f"ultrasonic FAULT: {why}; send 'reset'" if why else
                       "ultrasonic in FAULT: check TRIG/ECHO wires and ECHO divider", RED))
         elif s.get("obs_cm") == OBS_CM_MAX:

@@ -24,12 +24,16 @@
 #define B2_CAL_TICKS_PER_REV_RIGHT      (930U)
 #endif
 
-/* PROVISIONAL until S2-C02 / S2-C03 are run on the floor. */
+/* Circumference: PROVISIONAL until S2-C02 is run on the floor. */
 #ifndef B2_CAL_WHEEL_CIRCUMFERENCE_MM
 #define B2_CAL_WHEEL_CIRCUMFERENCE_MM   (210U)
 #endif
+/* Track: 110 mm, measured with a ruler 2026-11-20 (centre of one drive
+ * tyre to the centre of the other); was a provisional 120. S2-C03/C04 (turn
+ * 360 deg) can refine it: skid on the floor can make the effective track a
+ * little wider than the measured one. */
 #ifndef B2_CAL_WHEEL_TRACK_MM
-#define B2_CAL_WHEEL_TRACK_MM           (120U)
+#define B2_CAL_WHEEL_TRACK_MM           (110U)
 #endif
 
 /* Mean of the two wheels, for code that only counts one "robot" tick

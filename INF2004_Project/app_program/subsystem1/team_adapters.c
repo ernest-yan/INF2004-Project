@@ -357,6 +357,7 @@ void ultra_get_status(ultra_status_t *p_out)
 
 	p_out->obstacle_state = (uint8_t)s.state;
 	p_out->fault          = subsystem5_first_fault(s.fault_mask);
+	p_out->bypass_phase   = s.bypass_phase;
 	p_out->nearest_cm     = s.front_valid? clamp_bits(s.front_mm / MM_PER_CM, 9u):
 					       NO_ECHO_CM;
 	p_out->profile_count  = g_profile_count;
@@ -367,4 +368,11 @@ void ultra_get_status(ultra_status_t *p_out)
 	p_out->clear_r_cm     = p->right_clearance_valid?
 				clamp_bits(p->right_clearance_mm / MM_PER_CM, 9u): 0u;
 	p_out->decision       = (uint8_t)p->candidate_side;
+	{
+		uint32_t k;
+
+		for (k = 0u; k < 5u; k++) {
+			p_out->raw_cm[k] = s.coarse_cm[k];
+		}
+	}
 }

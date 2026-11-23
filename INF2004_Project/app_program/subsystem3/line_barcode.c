@@ -772,6 +772,7 @@ static void line_follow_task(INT stacd, void *exinf)
 	BOOL line_is_left = FALSE;
 	BOOL junction_armed = TRUE;
 	uint32_t lost_since = 0u;
+	BOOL after_s5 = FALSE;	/* held by an S5 obstacle bypass */
 	uint32_t junction_since = 0u;
 	uint32_t turn_since = 0u;
 	BOOL turn_left_start = FALSE;	/* centre has left the starting line */
@@ -807,16 +808,34 @@ static void line_follow_task(INT stacd, void *exinf)
 		d = get_line_barcode_data_safe();
 
 		if (!line_follow_allowed()) {
+			subsystem5_status_t s5;
+
+			subsystem5_get_status(&s5);
+			/* 20 Nov: remember an S5 bypass (it ends by stopping the car
+			   on the line); a FAULT or a STOP from S1 does not count. */
+			if (!s1_mission_go() || (s5.state == subsystem5_STATE_FAULT)) {
+				after_s5 = FALSE;
+			} else if (s5.state != subsystem5_STATE_MONITOR) {
+				after_s5 = TRUE;
+			} else {
+				/* unchanged */
+			}
 			if (state != LF_IDLE) {
 				b2_stop();
 				state = LF_IDLE;
 				tm_printf((UB*)"[S3] holding: no START (S1), S4 calibrating, or S5 or S2 needs the wheels stopped\n");
 			}
 		} else if (state == LF_IDLE) {
-			if (d.line_detected) {
+			/* After an S5 bypass, follow at once: the bypass stops the car
+			   on the line, and if it rolled just off the tape, the 2.5 s
+			   line search (S3_LINE_LOST_MS) finds it again. Before, S3
+			   waited for a sensor on the line and the car stood still. */
+			if (d.line_detected || after_s5) {
 				state = LF_FOLLOW;
 				lost_since = app_time_us_32();
-				tm_printf((UB*)"[S3] line found, following\n");
+				tm_printf((UB*)(after_s5 ? "[S3] back from the bypass, following\n"
+						       : "[S3] line found, following\n"));
+				after_s5 = FALSE;
 			}
 		}
 

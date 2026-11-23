@@ -190,11 +190,15 @@ MovementAction_t get_action_for_character(char c);
 					   the 90 deg corner and ended up parallel to,
 					   but beside, the new line (2026-11-19 video).
 					   S2 checks for stalls only from 40 mm/s up */
-#define S3_STEER_EXIT_MS	0	/* centre found the line again after a
+#define S3_STEER_EXIT_MS	150	/* centre found the line again after a
 					   correction: keep arcing gently that way
 					   this long (0 = off, snap straight).
 					   Try 150 only if the car undershoots
-					   curves (wobbles on the inside) */
+					   curves (wobbles on the inside).
+					   20 Nov: 0 -> 150, on a curve the car
+					   zig-zagged left sensor / centre /
+					   left sensor instead of holding the
+					   line under the centre sensor */
 #define S3_STEER_EXIT_INNER_MM_S 50	/* inner wheel during that soft exit
 					   (outer = S3_LINE_SPEED_MM_S) */
 #define S3_SCAN_HOLD_MAX_MS	4500	/* drive straight at most this long while

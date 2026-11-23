@@ -103,7 +103,7 @@ int main(void)
     CHECK(sizeof(LineBarcodeData_t) == 5U); /* S3: + last_scan_elems/result */
     CHECK(sizeof(motion_status_t) == 8U);
     CHECK(sizeof(imu_status_t) == 10U);
-    CHECK(sizeof(ultra_status_t) == 8U);
+    CHECK(sizeof(ultra_status_t) == 16U);  /* 20 Nov: + bypass step, raw_cm[5] (13 B, 4-aligned) */
     CHECK(sizeof(S1_STATS) == 8U);
 
     /* no fault */

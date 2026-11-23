@@ -19,7 +19,7 @@ subsystem, ask its owner or open a pull request for them to review.
 |---|---|---|---|---|---|
 | 1 | WiFi telemetry + remote commands over MQTT (no pins of its own) | 2502568 | caveman37 | `app_program/subsystem1/` | `testing/subsystem1/` |
 | 2 | Motion control: 2 DC motors (PWM) + 2 wheel encoders, speed/distance/turn goals, emergency brake | | | `app_program/subsystem2/` | `testing/subsystem2/` |
-| 3 | Line sensors + Code 39 barcode reader (left/centre IR line sensors, right IR barcode sensor) | | | `app_program/subsystem3/` | `testing/subsystem3/` |
+| 3 | Line sensors + Code 39 barcode reader (left/centre IR line sensors, right IR barcode sensor) | 2500415 | ernest-yan | `app_program/subsystem3/` | `testing/subsystem3/` |
 | 4 | GY-511 (LSM303DLHC) accelerometer: lifted / overturned detection -> brake (latched, ends the run), hump-height profile, turn rate, motion class | | | `app_program/subsystem4/` | `testing/subsystem4/` |
 | 5 | HC-SR04 ultrasonic + SG90 servo: obstacle stop request and obstacle profile scan | | | `app_program/subsystem5/` | `testing/subsystem5/` |
 | — | *Team glue:* `vehicle_ctrl` task (connects S2/S3/S4/S5) | all | | `app_program/integration/` | `testing/integration/` |

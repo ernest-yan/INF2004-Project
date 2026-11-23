@@ -399,7 +399,7 @@ static void test_calibration_header(void)
 {
     CHECK(B2_CAL_TICKS_PER_REV_MEAN == 930U);
     CHECK(B2_CAL_TICKS_PER_M == 4429U);             /* S5 had 4429 */
-    CHECK(B2_CAL_TURN_TICKS_PER_DEG_X10 == 46U);    /* S5 had 46 */
+    CHECK(B2_CAL_TURN_TICKS_PER_DEG_X10 == 43U);    /* 20 Nov: track measured 110 mm (was 120 -> 46) */
     CHECK(b2_turn_to_mm(90U, 120U) == 94U);         /* pi*120/4 = 94.2 */
     CHECK(b2_turn_to_ticks(90U, 120U, 930U, 210U) ==
           b2_mm_to_ticks(94U, 930U, 210U));
