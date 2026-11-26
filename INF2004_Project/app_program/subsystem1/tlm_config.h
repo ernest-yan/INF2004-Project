@@ -1,12 +1,12 @@
 /*
- *	tlm_config.h
- *	Subsystem 1 (Buddy 1) -- WiFi telemetry and commands: every tuning
- *	number in one place (no magic numbers anywhere else).
+ *      tlm_config.h
+ *      Subsystem 1 (Buddy 1) -- WiFi telemetry and commands: every tuning
+ *      number in one place (no magic numbers anywhere else).
  *
- *	Plain C only (stdint), so it can be included from BOTH sides:
- *	  - our own files (which also include tk/tkernel.h), and
- *	  - lib/liblwip/sysdepend/pico_rp2040/mqtt_utk.c (which includes lwIP).
- *	Never include tk/tkernel.h, lwIP or pico-sdk headers from here.
+ *      Plain C only (stdint), so it can be included from BOTH sides:
+ *        - our own files (which also include tk/tkernel.h), and
+ *        - lib/liblwip/sysdepend/pico_rp2040/mqtt_utk.c (which includes lwIP).
+ *      Never include tk/tkernel.h, lwIP or pico-sdk headers from here.
  */
 
 #ifndef TLM_CONFIG_H

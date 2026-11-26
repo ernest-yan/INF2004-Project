@@ -1,3 +1,8 @@
+/*
+ * b2_math.c
+ * Subsystem 2 -- unit conversions between millimetres, degrees and encoder
+ * ticks (b2_math.h). Pure integer maths, no hardware.
+ */
 #include "b2_math.h"
 #include <limits.h>
 uint32_t b2_mm_to_ticks(uint32_t mm, uint32_t tpr, uint32_t circ)

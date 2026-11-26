@@ -34,3 +34,14 @@ Add a new row for every run. Never edit or delete old rows.
 | Date | Test ID | Commit | Tester | Result | Log / evidence | Notes |
 |---|---|---|---|---|---|---|
 | YYYY-MM-DD | INT-01 | `abc1234` | | PASS / FAIL | `logs/YYYY-MM-DD_….txt` | |
+| 2026-11-13 | INT-01 | see log | floor run (log reviewed 23 Nov) | PASS | [`2026-11-13_dashboard.csv`](../subsystem1/logs/2026-11-13_dashboard.csv), 18:14:34 | Decoded barcode (LEFT) reached the vehicle controller, which switched LINE_FOLLOW → BARCODE_NAV, and S1, which published the BARCODE event. Decoded letter correct (S3-M01) |
+| 2026-11-13 | INT-02 | see log | floor run (log reviewed 23 Nov) | PASS (stop) | [`2026-11-13_dashboard.csv`](../subsystem1/logs/2026-11-13_dashboard.csv) | 9 obstacle stops while driving, triggered at 20–36 cm, robot at rest 90–875 ms later. No obstacle profile reached the dashboard in this session |
+| 2026-11-16 | INT-02 | see log | floor run (log reviewed 23 Nov) | PASS | [`2026-11-16_dashboard_groupmate.csv`](../subsystem1/logs/2026-11-16_dashboard_groupmate.csv) | Obstacle stops followed by completed scans: profiles at 16:02:50 (nearest 9 cm, width 3 cm, implausible) and 16:35:06 (nearest 18 cm, width 31 cm) |
+| 2026-11-16 | INT-03 | see log | floor run (log reviewed 23 Nov) | PARTIAL (4 of 5) | [`2026-11-16_dashboard_groupmate.csv`](../subsystem1/logs/2026-11-16_dashboard_groupmate.csv) | Same events as S4-M01: the IMU lift latched the S2 brake (E-STOP source IMU) every time; wheels at 0 within 2 s in 4 of 5 |
+| 2026-11-13 | INT-06 | see log | floor run (log reviewed 23 Nov) | PASS (jittery) | [`2026-11-13_dashboard.csv`](../subsystem1/logs/2026-11-13_dashboard.csv) | Follows the line on the floor at ~70 mm/s; longest continuous LINE_FOLLOW 51.8 s. But 102 LINE_FOLLOW stretches with a median of only 0.60 s before dropping to LINE_SEARCH and recovering |
+| 2026-11-13 | INT-08 | see log | floor run (log reviewed 23 Nov) | FAIL | [`2026-11-13_dashboard.csv`](../subsystem1/logs/2026-11-13_dashboard.csv) | OBSTACLE_AVOID entered 13 times: 12 ended in SAFE_STOP, 1 in IDLE; no bypass back to the line |
+| 2026-11-16 | INT-08 | see log | floor run (log reviewed 23 Nov) | FAIL | [`2026-11-16_dashboard_groupmate.csv`](../subsystem1/logs/2026-11-16_dashboard_groupmate.csv) | OBSTACLE_AVOID → SAFE_STOP 6 of 6 times. (The S5 bypass was rewritten on 20 Nov, `58493a2`, after these runs; not re-logged) |
+| 2026-11-16 | INT-09 | see log | floor run (log reviewed 23 Nov) | PASS | see S1-M01 (16 Nov) | Wheel speeds and encoders on the dashboard |
+| 2026-11-16 | INT-10 | see log | floor run (log reviewed 23 Nov) | PASS | see S1-M02 (16 Nov) | Line sensor state on the dashboard |
+| 2026-11-16 | INT-11 | see log | floor run (log reviewed 23 Nov) | PASS | see S1-M03 (16 Nov) | Pitch on the dashboard |
+| 2026-11-16 | INT-12 | see log | floor run (log reviewed 23 Nov) | PASS | see S1-M04 (16 Nov) | Obstacle distance on the dashboard |

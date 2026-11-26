@@ -1,15 +1,15 @@
 /*
- *	tlm_bridge.h
- *	Subsystem 1 (Buddy 1) -- the ONLY doorway between the WiFi service
- *	task (mqtt_utk.c) and our telemetry code.
+ *      tlm_bridge.h
+ *      Subsystem 1 (Buddy 1) -- the ONLY doorway between the WiFi service
+ *      task (mqtt_utk.c) and our telemetry code.
  *
- *	Every function here is called ONLY from mqtt_utk.c, i.e. from inside
- *	the kernel's cyw43_utk_task (TEAM.md section 3: no student task may
- *	call cyw43/lwIP/MQTT). The bridge never calls lwIP itself; it hands
- *	bytes and topic names back and mqtt_utk.c does the publishing.
+ *      Every function here is called ONLY from mqtt_utk.c, i.e. from inside
+ *      the kernel's cyw43_utk_task (TEAM.md section 3: no student task may
+ *      call cyw43/lwIP/MQTT). The bridge never calls lwIP itself; it hands
+ *      bytes and topic names back and mqtt_utk.c does the publishing.
  *
- *	Plain C types only (stdint), so mqtt_utk.c can include this file
- *	without pulling in tk/tkernel.h.
+ *      Plain C types only (stdint), so mqtt_utk.c can include this file
+ *      without pulling in tk/tkernel.h.
  */
 
 #ifndef TLM_BRIDGE_H

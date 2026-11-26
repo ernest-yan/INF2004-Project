@@ -1,34 +1,34 @@
 /*
- *	terrain.h
- *	Subsystem 4 -- hump detection and height.
+ *      terrain.h
+ *      Subsystem 4 -- hump detection and height.
  *
- *	Pure maths, no hardware (tested in subsystem4_test.c, S4-U03/U04/U13).
+ *      Pure maths, no hardware (tested in subsystem4_test.c, S4-U03/U04/U13).
  *
- *	How it measures (peak-tilt method):
- *	A hump shorter than about two wheelbases does not lift the whole car;
- *	the car ROCKS over it. When the front reaches the top while the rear
- *	is still on the floor, the car is tilted by
- *	    sin(tilt) = hump height / wheelbase
- *	and when the rear reaches the top after the front has come down, it is
- *	tilted the same amount the other way. So
- *	    height = wheelbase * (sin(peak nose-up) + sin(peak nose-down)) / 2
- *	On this car the small front caster barely tilts it; the big rear drive
- *	wheels climbing give the clear, long nose-down half. So each half is
- *	used on its own when it is solid (tilted over >= 30 mm of driving),
- *	and the two are averaged when both are.
- *	The distance travelled between the two peaks is itself the wheelbase,
- *	which the hump summary reports as a cross-check (peak_gap_mm).
- *	The hump ends after 80 mm of travel with no clear tilt (a wheelbase +
- *	40 mm while only one direction has been seen), or when the car
- *	stops for 1 s (measured if both phases were seen, otherwise dropped).
- *	Only tilt seen while the wheels turn counts: picking up or moving a
- *	stopped car never changes a hump.
- *	Pulling away or braking tilts the car over only ~10 mm of travel, so
- *	it is never a solid half and never a hump.
- *	Accurate when the hump's half-length is no longer than the wheelbase.
+ *      How it measures (peak-tilt method):
+ *      A hump shorter than about two wheelbases does not lift the whole car;
+ *      the car ROCKS over it. When the front reaches the top while the rear
+ *      is still on the floor, the car is tilted by
+ *          sin(tilt) = hump height / wheelbase
+ *      and when the rear reaches the top after the front has come down, it is
+ *      tilted the same amount the other way. So
+ *          height = wheelbase * (sin(peak nose-up) + sin(peak nose-down)) / 2
+ *      On this car the small front caster barely tilts it; the big rear drive
+ *      wheels climbing give the clear, long nose-down half. So each half is
+ *      used on its own when it is solid (tilted over >= 30 mm of driving),
+ *      and the two are averaged when both are.
+ *      The distance travelled between the two peaks is itself the wheelbase,
+ *      which the hump summary reports as a cross-check (peak_gap_mm).
+ *      The hump ends after 80 mm of travel with no clear tilt (a wheelbase +
+ *      40 mm while only one direction has been seen), or when the car
+ *      stops for 1 s (measured if both phases were seen, otherwise dropped).
+ *      Only tilt seen while the wheels turn counts: picking up or moving a
+ *      stopped car never changes a hump.
+ *      Pulling away or braking tilts the car over only ~10 mm of travel, so
+ *      it is never a solid half and never a hump.
+ *      Accurate when the hump's half-length is no longer than the wheelbase.
  *
- *	The old method (distance x slope, added up) measured the AVERAGE height
- *	under the car: about 6 mm for the course's 10 mm hump.
+ *      The old method (distance x slope, added up) measured the AVERAGE height
+ *      under the car: about 6 mm for the course's 10 mm hump.
  */
 #ifndef B4_TERRAIN_H
 #define B4_TERRAIN_H

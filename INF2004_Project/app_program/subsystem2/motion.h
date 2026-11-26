@@ -1,3 +1,8 @@
+/*
+ * motion.h
+ * Subsystem 2 -- motion control: motor PWM, wheel encoders, speed control,
+ * distance and turn goals, latched emergency brake.
+ */
 #ifndef B2_MOTION_H
 #define B2_MOTION_H
 #include <stdbool.h>

@@ -14,7 +14,7 @@ one change reaches both.
 |---|---|---|
 | `B2_CAL_TICKS_PER_REV_LEFT` / `_RIGHT` | 930 / 930 | S2-C01 (hand turns) |
 | `B2_CAL_WHEEL_CIRCUMFERENCE_MM` | 210 (provisional) | S2-C02 (drive 1 m) |
-| `B2_CAL_WHEEL_TRACK_MM` | 120 (provisional) | S2-C03, S2-C04 (turn 360°) |
+| `B2_CAL_WHEEL_TRACK_MM` | 110 (ruler, 20 Nov) | S2-C03, S2-C04 (turn 360°) |
 
 ## What you need
 

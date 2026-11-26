@@ -35,3 +35,5 @@ Add a new row for every run. Never edit or delete old rows.
 | Date | Test ID | Commit | Tester | Result | Log / evidence | Notes |
 |---|---|---|---|---|---|---|
 | YYYY-MM-DD | S2-U01 | `abc1234` | | PASS / FAIL | `logs/YYYY-MM-DD_….txt` | |
+| 2026-11-08 | S2-C01 | see `motion_cal.h` | hand-turn session | FAIL | comment in [`motion_cal.h`](../../app_program/subsystem2/motion_cal.h) (no console log saved) | 10 turns per wheel: L 962, R 896 edges per turn, a 7 % gap against the ~2 % expected. Unconfirmed, so both wheels use the mean 930. Re-run before using per-wheel values |
+| 2026-11-13 | S2-M01 | see log | floor run (log reviewed 23 Nov) | PASS | [`2026-11-13_dashboard.csv`](../subsystem1/logs/2026-11-13_dashboard.csv) | Both encoders count while driving: L 28,275 / R 27,124 edges on straight sections, each wheel's count rising only with its own speed. From floor data, not the wheels-lifted hand-turn procedure |

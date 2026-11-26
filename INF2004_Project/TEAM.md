@@ -15,14 +15,14 @@ subsystem, ask its owner or open a pull request for them to review.
 
 ## 1. Members and subsystems
 
-| # | Subsystem (what it does) | Student ID | GitHub username | Code | Tests |
-|---|---|---|---|---|---|
-| 1 | WiFi telemetry + remote commands over MQTT (no pins of its own) | 2502568 | caveman37 | `app_program/subsystem1/` | `testing/subsystem1/` |
-| 2 | Motion control: 2 DC motors (PWM) + 2 wheel encoders, speed/distance/turn goals, emergency brake | | | `app_program/subsystem2/` | `testing/subsystem2/` |
-| 3 | Line sensors + Code 39 barcode reader (left/centre IR line sensors, right IR barcode sensor) | 2500415 | ernest-yan | `app_program/subsystem3/` | `testing/subsystem3/` |
-| 4 | GY-511 (LSM303DLHC) accelerometer: lifted / overturned detection -> brake (latched, ends the run), hump-height profile, turn rate, motion class | | | `app_program/subsystem4/` | `testing/subsystem4/` |
-| 5 | HC-SR04 ultrasonic + SG90 servo: obstacle stop request and obstacle profile scan | | | `app_program/subsystem5/` | `testing/subsystem5/` |
-| — | *Team glue:* `vehicle_ctrl` task (connects S2/S3/S4/S5) | all | | `app_program/integration/` | `testing/integration/` |
+| #   | Subsystem (what it does)                                                                                                                        | Student ID | GitHub username | Code                       | Tests                  |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | --------------- | -------------------------- | ---------------------- |
+| 1   | WiFi telemetry + remote commands over MQTT (no pins of its own)                                                                                 | 2502568    | caveman37       | `app_program/subsystem1/`  | `testing/subsystem1/`  |
+| 2   | Motion control: 2 DC motors (PWM) + 2 wheel encoders, speed/distance/turn goals, emergency brake                                                | 2500274    | yj33            | `app_program/subsystem2/`  | `testing/subsystem2/`  |
+| 3   | Line sensors + Code 39 barcode reader (left/centre IR line sensors, right IR barcode sensor)                                                    | 2500415    | ernest-yan      | `app_program/subsystem3/`  | `testing/subsystem3/`  |
+| 4   | GY-511 (LSM303DLHC) accelerometer: lifted / overturned detection -> brake (latched, ends the run), hump-height profile, turn rate, motion class | 2500300    | IvanHoSIT       | `app_program/subsystem4/`  | `testing/subsystem4/`  |
+| 5   | HC-SR04 ultrasonic + SG90 servo: obstacle stop request and obstacle profile scan                                                                | 2504000    | VaderPlays      | `app_program/subsystem5/`  | `testing/subsystem5/`  |
+| —   | *Team glue:* `vehicle_ctrl` task (connects S2/S3/S4/S5)                                                                                         | all        | all             | `app_program/integration/` | `testing/integration/` |
 
 Shared files (`app_program/app_main.c`, `app_program/app.h`, this file)
 are changed only by agreement of the team. The exception is claiming an empty
@@ -207,3 +207,21 @@ limit there. The numbers below are the example's usage.
 | Alarm handler | 12 | | | | | |
 
 (The kernel's USB and WiFi service tasks also use a few of these.)
+
+## 7. Deliverables and reports
+
+Where each deliverable from the Project Write-up and Change Requirement 1 lives.
+
+| Owner | Deliverable | Where |
+|---|---|---|
+| Buddy 1 | Communication API, telemetry framework | `app_program/subsystem1/` |
+| Buddy 1 | MQTT documentation | [MQTT_PROTOCOL.md](app_program/subsystem1/MQTT_PROTOCOL.md) |
+| Buddy 2 | Motion control library | `app_program/subsystem2/` |
+| Buddy 2 | PID tuning report | [PID_TUNING_REPORT.md](testing/subsystem2/PID_TUNING_REPORT.md) |
+| Buddy 2 | Motion accuracy evaluation | [MOTION_ACCURACY.md](testing/subsystem2/MOTION_ACCURACY.md) |
+| Buddy 3 | Line-following module, barcode decoder, navigation command interface | `app_program/subsystem3/` |
+| Buddy 4 | IMU processing module, hump detection algorithm | `app_program/subsystem4/` |
+| Buddy 4 | Terrain analysis report | [TERRAIN_ANALYSIS.md](testing/subsystem4/TERRAIN_ANALYSIS.md) |
+| Buddy 5 | Scanning subsystem, obstacle profile generator, avoidance and recovery algorithms | `app_program/subsystem5/` |
+| Team | Change Requirement 1 (data representation, RAM, message size, correctness and performance) | [CR1_REPORT.md](testing/cr1/CR1_REPORT.md) |
+| Team | BARR-C:2018 compliance | [BARR_C.md](BARR_C.md) |

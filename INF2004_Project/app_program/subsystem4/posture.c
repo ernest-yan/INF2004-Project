@@ -1,6 +1,6 @@
 /*
- *	posture.c
- *	Subsystem 4 -- lifted / overturned detection (see posture.h).
+ *      posture.c
+ *      Subsystem 4 -- lifted / overturned detection (see posture.h).
  */
 
 #include <stddef.h>  /* NULL; safe here: no kernel headers in this file */

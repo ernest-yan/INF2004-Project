@@ -1,3 +1,8 @@
+/*
+ * imu.h
+ * Subsystem 4 -- LSM303DLHC accelerometer: calibration, tilt, hump height,
+ * lift / overturn detection and motion class, polled at 100 Hz.
+ */
 #ifndef B4_IMU_H
 #define B4_IMU_H
 #include <stdbool.h>

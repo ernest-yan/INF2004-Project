@@ -33,3 +33,4 @@ Add a new row for every run. Never edit or delete old rows.
 | Date | Test ID | Commit | Tester | Result | Log / evidence | Notes |
 |---|---|---|---|---|---|---|
 | YYYY-MM-DD | S4-U01 | `abc1234` | | PASS / FAIL | `logs/YYYY-MM-DD_….txt` | |
+| 2026-11-16 | S4-M01 | see log | floor run (log reviewed 23 Nov) | PARTIAL (4 of 5) | [`2026-11-16_dashboard_groupmate.csv`](../subsystem1/logs/2026-11-16_dashboard_groupmate.csv) | 5 E-STOPs with source IMU (lift) at 16:02:51, 16:05:28, 16:09:57, 16:35:04, 16:53:59 (each event logged twice). In 4 both wheels read 0 mm/s within 2 s. At 16:09:57 the left wheel went 601 → 62 mm/s and still read 62 mm/s 2 s later. Whether every trigger was a real pick-up is not recorded; 16:35:04 came right after an obstacle scan. Early (pre-commit) version of lift detection |

@@ -24,3 +24,6 @@ config/wifi_secrets.h
 
 # macOS
 .DS_Store
+
+# Editor / notes-app settings (personal, not project files)
+.obsidian/

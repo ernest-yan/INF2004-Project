@@ -1,6 +1,6 @@
 /*
- *	terrain.c
- *	Subsystem 4 -- hump detection and height, peak-tilt method (terrain.h).
+ *      terrain.c
+ *      Subsystem 4 -- hump detection and height, peak-tilt method (terrain.h).
  */
 #include "terrain.h"
 #include "mathf.h"   /* PORT: replaces <math.h> (no libm linked) */

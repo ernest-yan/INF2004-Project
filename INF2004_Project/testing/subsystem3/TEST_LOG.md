@@ -26,3 +26,5 @@ Add a new row for every run. Never edit or delete old rows.
 | Date | Test ID | Commit | Tester | Result | Log / evidence | Notes |
 |---|---|---|---|---|---|---|
 | YYYY-MM-DD | S3-U01 | `abc1234` | | PASS / FAIL | `logs/YYYY-MM-DD_….txt` | |
+| 2026-11-13 | S3-M01 | see log | floor run (log reviewed 23 Nov) | FAIL | [`2026-11-13_dashboard.csv`](../subsystem1/logs/2026-11-13_dashboard.csv) | Session 34179: barcode seen but reported INVALID (BARCODE event value 5) |
+| 2026-11-13 | S3-M01 | see log | floor run (log reviewed 23 Nov) | PASS | [`2026-11-13_dashboard.csv`](../subsystem1/logs/2026-11-13_dashboard.csv), 18:14:34 | Session 46008: barcode decoded as LEFT (event value 1) while line following, matching the printed barcode (confirmed by the team); the car switched to BARCODE_NAV |

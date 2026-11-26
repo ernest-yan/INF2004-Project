@@ -1,32 +1,32 @@
 /*
- *	posture.h
- *	Subsystem 4 -- "has the robot been lifted or overturned?"
+ *      posture.h
+ *      Subsystem 4 -- "has the robot been lifted or overturned?"
  *
- *	Pure maths, no hardware: imu.c feeds it one accelerometer sample
- *	(car frame, mg) every 10 ms. Tested with made-up data in
- *	subsystem4_test.c (S4-U05..U08).
+ *      Pure maths, no hardware: imu.c feeds it one accelerometer sample
+ *      (car frame, mg) every 10 ms. Tested with made-up data in
+ *      subsystem4_test.c (S4-U05..U08).
  *
- *	How it decides (all thresholds PROVISIONAL, tune on the robot):
- *	  OVERTURNED  the gravity vector has turned more than overturn_tilt_deg
- *	              away from the calibrated "level" direction for 100 ms.
- *	  LIFTED      any one of:
- *	              - it is MOVING upwards faster than lift_speed_mm_s for
- *	                100 ms. Upward speed = vertical acceleration integrated
- *	                over about 1 s. This is the rule that catches a normal
- *	                or gentle pick-up while driving: vibration is zero on
- *	                average so it cancels in the integral, and a hump at
- *	                line speed only lifts the body at ~20 mm/s.
- *	              - a sharp upward jolt: more than lift_accel_mg above 1 g
- *	                for 50 ms (a quick snatch);
- *	              - it is held tilted more than lift_tilt_deg for 200 ms
- *	                (picked up and carried).
- *	Short shocks (hump edges, wheel bumps) are filtered out by the low-pass
- *	filters and the hold times.
- *	Putting the robot DOWN looks like a lift at the moment it lands (the
- *	downward speed is stopped by an upward push). So after a clear downward
- *	movement the two "upward" rules are ignored for 1 s.
- *	Limit: a 20 cm lift spread over more than ~2 s never reaches the speed
- *	threshold; an accelerometer alone cannot see it.
+ *      How it decides (all thresholds PROVISIONAL, tune on the robot):
+ *        OVERTURNED  the gravity vector has turned more than overturn_tilt_deg
+ *                    away from the calibrated "level" direction for 100 ms.
+ *        LIFTED      any one of:
+ *                    - it is MOVING upwards faster than lift_speed_mm_s for
+ *                      100 ms. Upward speed = vertical acceleration integrated
+ *                      over about 1 s. This is the rule that catches a normal
+ *                      or gentle pick-up while driving: vibration is zero on
+ *                      average so it cancels in the integral, and a hump at
+ *                      line speed only lifts the body at ~20 mm/s.
+ *                    - a sharp upward jolt: more than lift_accel_mg above 1 g
+ *                      for 50 ms (a quick snatch);
+ *                    - it is held tilted more than lift_tilt_deg for 200 ms
+ *                      (picked up and carried).
+ *      Short shocks (hump edges, wheel bumps) are filtered out by the low-pass
+ *      filters and the hold times.
+ *      Putting the robot DOWN looks like a lift at the moment it lands (the
+ *      downward speed is stopped by an upward push). So after a clear downward
+ *      movement the two "upward" rules are ignored for 1 s.
+ *      Limit: a 20 cm lift spread over more than ~2 s never reaches the speed
+ *      threshold; an accelerometer alone cannot see it.
  */
 
 #ifndef B4_POSTURE_H

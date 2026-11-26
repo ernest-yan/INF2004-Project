@@ -765,50 +765,54 @@ void b2_poll(void)
             {
                 pwm_cmd[i] = 0;
                 s_integral[i] = 0;
-                continue;
             }
-            /* Set-point after the straight-line trim: the wheel that is
-             * ahead is slowed, the one behind is sped up. */
-            const int32_t target = b2_clamp(b2_abs32(request) +
-                                            ((i == 0U) ? -trim : trim),
-                                            0, (int32_t)s_cfg->max_speed_mm_s);
-            const int32_t error = target - speed_now;
-            /* +-8000 * ki 8/256 = +-250 permil: room for a slope, but no
-             * longer enough to drive the motor on its own (was +-20000,
-             * = +-625 of the 650 permil maximum). */
-            s_integral[i] = (int16_t)b2_clamp((int32_t)s_integral[i] + error,
-                                              -B2_INTEGRAL_LIMIT,
-                                              B2_INTEGRAL_LIMIT);
-            const int32_t ff = ((int32_t)s_cfg->max_pwm_permil * target) /
-                               (int32_t)s_cfg->max_speed_mm_s;
-            const int32_t p = ((int32_t)s_cfg->kp_q8 * error) / 256;
-            const int32_t integral =
-                ((int32_t)s_cfg->ki_q8 * s_integral[i]) / 256;
-            /* D on the measurement, not the error: a set-point step (S3
-             * steering) gives no derivative kick. Opposes acceleration. */
-            const int32_t derivative =
-                -(((int32_t)s_cfg->kd_q8 * (speed_now - speed_prev)) / 256);
-            const int32_t duty = b2_clamp(ff + p + integral + derivative,
-                                          B2_MIN_OUTPUT,
-                                          (int32_t)s_cfg->max_pwm_permil);
-            pwm_cmd[i] = (request < 0) ? -duty : duty;
-            /* INTEGRATION FIX: an encoder edge can land between reading `now`
-             * and taking the lock, making the edge newer than `now`; the
-             * unsigned subtraction then wraps to a huge age and a false
-             * ENCODER_STALL.  Frequent at ~450 edges/s.  CR1: 32-bit times,
-             * so "newer" is a wrap-safe signed compare. */
-            const uint32_t age = b2_time_after(edges_at_us[i], now) ? 0U :
-                                 (now - edges_at_us[i]);
-            const uint32_t stall_us = (uint32_t)s_cfg->encoder_stall_ms * 1000U;
-            if (((s_status.state == B2_EXECUTE_GOAL) ||
-                 (s_status.state == B2_TRACK_SPEED)) &&
-                (b2_abs32(request) >= 40) &&
-                (age > stall_us) &&
-                ((now - s_wheel_started_us[i]) > stall_us))
+            else
             {
-                b2_fault_now(B2_FAULT_ENCODER_STALL);
-                b2_deliver_event();
-                return;
+                /* Set-point after the straight-line trim: the wheel that is
+                 * ahead is slowed, the one behind is sped up. */
+                const int32_t target =
+                    b2_clamp(b2_abs32(request) + ((i == 0U) ? -trim : trim),
+                             0, (int32_t)s_cfg->max_speed_mm_s);
+                const int32_t error = target - speed_now;
+                /* +-8000 * ki 8/256 = +-250 permil: room for a slope, but no
+                 * longer enough to drive the motor on its own (was +-20000,
+                 * = +-625 of the 650 permil maximum). */
+                s_integral[i] =
+                    (int16_t)b2_clamp((int32_t)s_integral[i] + error,
+                                      -B2_INTEGRAL_LIMIT, B2_INTEGRAL_LIMIT);
+                const int32_t ff = ((int32_t)s_cfg->max_pwm_permil * target) /
+                                   (int32_t)s_cfg->max_speed_mm_s;
+                const int32_t p = ((int32_t)s_cfg->kp_q8 * error) / 256;
+                const int32_t integral =
+                    ((int32_t)s_cfg->ki_q8 * s_integral[i]) / 256;
+                /* D on the measurement, not the error: a set-point step (S3
+                 * steering) gives no derivative kick. Opposes acceleration. */
+                const int32_t derivative =
+                    -(((int32_t)s_cfg->kd_q8 * (speed_now - speed_prev)) / 256);
+                const int32_t duty = b2_clamp(ff + p + integral + derivative,
+                                              B2_MIN_OUTPUT,
+                                              (int32_t)s_cfg->max_pwm_permil);
+                pwm_cmd[i] = (request < 0) ? -duty : duty;
+                /* INTEGRATION FIX: an encoder edge can land between reading
+                 * `now` and taking the lock, making the edge newer than
+                 * `now`; the unsigned subtraction then wraps to a huge age
+                 * and a false ENCODER_STALL.  Frequent at ~450 edges/s.
+                 * CR1: 32-bit times, so "newer" is a wrap-safe signed
+                 * compare. */
+                const uint32_t age = b2_time_after(edges_at_us[i], now) ? 0U :
+                                     (now - edges_at_us[i]);
+                const uint32_t stall_us =
+                    (uint32_t)s_cfg->encoder_stall_ms * 1000U;
+                if (((s_status.state == B2_EXECUTE_GOAL) ||
+                     (s_status.state == B2_TRACK_SPEED)) &&
+                    (b2_abs32(request) >= 40) &&
+                    (age > stall_us) &&
+                    ((now - s_wheel_started_us[i]) > stall_us))
+                {
+                    b2_fault_now(B2_FAULT_ENCODER_STALL);
+                    b2_deliver_event();
+                    return;
+                }
             }
         }
         irq = app_lock(&s_lock);

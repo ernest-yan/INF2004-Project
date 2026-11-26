@@ -1,26 +1,26 @@
 /*
- *	team_adapters.c
- *	Subsystem 1 -- turns the other buddies' REAL status into the
- *	telemetry structs in team_interfaces.h, and carries out remote
- *	commands with their public functions.
+ *      team_adapters.c
+ *      Subsystem 1 -- turns the other buddies' REAL status into the
+ *      telemetry structs in team_interfaces.h, and carries out remote
+ *      commands with their public functions.
  *
- *	Only CALLS their public functions; never changes their code.
- *	Called only from OUR telemetry task (never from the WiFi task),
- *	because some of them take a kernel mutex and may wait briefly.
+ *      Only CALLS their public functions; never changes their code.
+ *      Called only from OUR telemetry task (never from the WiFi task),
+ *      because some of them take a kernel mutex and may wait briefly.
  *
- *	  E-STOP  -> b2_emergency_brake()   (latched until RESET)
- *	  RESET   -> b2/b4_authorized_reset_while_stopped(),
- *	             subsystem5_reset_fault_while_stopped()
- *	  START   -> s1_mission_go() = TRUE (for S3 to check)
- *	  STOP    -> s1_mission_go() = FALSE + b2_stop()
- *	  MAP     -> set_mqtt_action_mapping()                (Buddy 3)
+ *        E-STOP  -> b2_emergency_brake()   (latched until RESET)
+ *        RESET   -> b2/b4_authorized_reset_while_stopped(),
+ *                   subsystem5_reset_fault_while_stopped()
+ *        START   -> s1_mission_go() = TRUE (for S3 to check)
+ *        STOP    -> s1_mission_go() = FALSE + b2_stop()
+ *        MAP     -> set_mqtt_action_mapping()                (Buddy 3)
  *
- *	  motion_get_status()  <- b2_get_status()               (Buddy 2)
- *	  line_get_status()    <- get_line_barcode_data_safe()  (Buddy 3)
- *	  imu_get_status()     <- b4_get_status()               (Buddy 4)
- *	  ultra_get_status()   <- subsystem5_get_status()       (Buddy 5)
- *	  vehicle_get_status() <- worked out from all of the above
- *	                          (there is no VehicleController state yet)
+ *        motion_get_status()  <- b2_get_status()               (Buddy 2)
+ *        line_get_status()    <- get_line_barcode_data_safe()  (Buddy 3)
+ *        imu_get_status()     <- b4_get_status()               (Buddy 4)
+ *        ultra_get_status()   <- subsystem5_get_status()       (Buddy 5)
+ *        vehicle_get_status() <- worked out from all of the above
+ *                                (there is no VehicleController state yet)
  */
 
 #include "../app.h"
@@ -32,347 +32,347 @@
 #include "../subsystem4/imu.h"
 #include "../subsystem5/ultrasonic.h"
 
-#define MM_PER_CM		10
-#define CDEG_PER_DEG		100
-#define PITCH_MIN_DEG		(-64)		/* 7-bit field in the STATUS frame */
-#define PITCH_MAX_DEG		63
-#define NO_ECHO_CM		0x1FFu		/* 9-bit max: no valid reading */
+#define MM_PER_CM               10
+#define CDEG_PER_DEG            100
+#define PITCH_MIN_DEG           (-64)           /* 7-bit field in the STATUS frame */
+#define PITCH_MAX_DEG           63
+#define NO_ECHO_CM              0x1FFu          /* 9-bit max: no valid reading */
 
 /* Remote command state: written only by our telemetry task. */
-LOCAL volatile BOOL	g_go = S1_GO_AT_POWER_ON;	/* s1_mission_go() */
-LOCAL BOOL		g_remote_estop;	/* remote E-STOP latched until RESET */
+LOCAL volatile BOOL     g_go = S1_GO_AT_POWER_ON;       /* s1_mission_go() */
+LOCAL BOOL              g_remote_estop; /* remote E-STOP latched until RESET */
 
 /* Rising-edge counters for the telemetry EVENT frames. */
-LOCAL BOOL	g_prev_lift;
-LOCAL UB	g_lift_count;		/* CR1: 8-bit, wraps (event trigger) */
-LOCAL BOOL	g_prev_scan;
-LOCAL UB	g_profile_count;
+LOCAL BOOL      g_prev_lift;
+LOCAL UB        g_lift_count;           /* CR1: 8-bit, wraps (event trigger) */
+LOCAL BOOL      g_prev_scan;
+LOCAL UB        g_profile_count;
 
 LOCAL uint16_t clamp_u16(int32_t v)
 {
-	if (v < 0) {
-		v = -v;			/* speed: direction is not sent */
-	}
-	return (uint16_t)((v > 0xFFFF)? 0xFFFF: v);
+    if (v < 0) {
+        v = -v;                 /* speed: direction is not sent */
+    }
+    return (uint16_t)((v > 0xFFFF)? 0xFFFF: v);
 }
 
 LOCAL uint8_t clamp_u8(uint32_t v)
 {
-	return (uint8_t)((v > 0xFFu)? 0xFFu: v);
+    return (uint8_t)((v > 0xFFu)? 0xFFu: v);
 }
 
 /* CR1: a value into an n-bit unsigned field, saturating (never wraps). */
 LOCAL uint32_t clamp_bits(uint32_t v, uint32_t bits)
 {
-	const uint32_t max = (1u << bits) - 1u;
-	return (v > max)? max: v;
+    const uint32_t max = (1u << bits) - 1u;
+    return (v > max)? max: v;
 }
 
 /* CR1: the system fault bitmask (team_interfaces.h), built from each
  * subsystem's own fault bitmask. Bit positions follow b2/b4/subsystem5
  * FAULT_BIT(): fault enum value f is bit (f - 1) in its subsystem's mask. */
 LOCAL uint16_t build_fault_mask(const b2_status_t *p_m,
-				const LineBarcodeData_t *p_l,
-				const b4_status_t *p_i,
-				const subsystem5_status_t *p_u)
+                const LineBarcodeData_t *p_l,
+                const b4_status_t *p_i,
+                const subsystem5_status_t *p_u)
 {
-	uint16_t f = 0u;
+    uint16_t f = 0u;
 
-	f |= (uint16_t)((uint16_t)p_m->fault_mask << 0) & SYS_FLT_S2_ALL;
-	if (p_l->fault_mask != 0u) {
-		f |= SYS_FLT_LINE_LOSS;
-	}
-	f |= (uint16_t)((uint16_t)p_i->fault_mask << 5) & SYS_FLT_S4_ALL;
-	f |= (uint16_t)((uint16_t)p_u->fault_mask << 8) & SYS_FLT_S5_ALL;
+    f |= (uint16_t)((uint16_t)p_m->fault_mask << 0) & SYS_FLT_S2_ALL;
+    if (p_l->fault_mask != 0u) {
+        f |= SYS_FLT_LINE_LOSS;
+    }
+    f |= (uint16_t)((uint16_t)p_i->fault_mask << 5) & SYS_FLT_S4_ALL;
+    f |= (uint16_t)((uint16_t)p_u->fault_mask << 8) & SYS_FLT_S5_ALL;
 #if TM_MQTT
-	if (!s1_is_online()) {
-		f |= SYS_FLT_WIFI_LOSS;
-	}
+    if (!s1_is_online()) {
+        f |= SYS_FLT_WIFI_LOSS;
+    }
 #endif
-	return f;
+    return f;
 }
 
 uint16_t system_fault_mask(void)
 {
-	b2_status_t		m;
-	b4_status_t		i;
-	subsystem5_status_t	u;
-	LineBarcodeData_t	l;
+    b2_status_t             m;
+    b4_status_t             i;
+    subsystem5_status_t     u;
+    LineBarcodeData_t       l;
 
-	b2_get_status(&m);
-	b4_get_status(&i);
-	subsystem5_get_status(&u);
-	l = get_line_barcode_data_safe();
-	return build_fault_mask(&m, &l, &i, &u);
+    b2_get_status(&m);
+    b4_get_status(&i);
+    subsystem5_get_status(&u);
+    l = get_line_barcode_data_safe();
+    return build_fault_mask(&m, &l, &i, &u);
 }
 
 /* ---- remote commands (from our telemetry task, never the WiFi task) ---- */
 
 EXPORT BOOL s1_mission_go(void)
 {
-	return g_go;
+    return g_go;
 }
 
 LOCAL BOOL wheels_driven(const b2_status_t *p_m)
 {
-	return (p_m->state == B2_TRACK_SPEED) || (p_m->state == B2_EXECUTE_GOAL);
+    return (p_m->state == B2_TRACK_SPEED) || (p_m->state == B2_EXECUTE_GOAL);
 }
 
 /* START sets the "go" flag; STOP clears it and stops the wheels.
  * S3's line_follow_allowed() checks the flag, so it stays stopped. */
 bool vehicle_post_event(const vehicle_event_t *p_evt)
 {
-	vehicle_status_t	v;
+    vehicle_status_t        v;
 
-	if (p_evt->type == (uint8_t)VEH_EVT_START) {
-		vehicle_get_status(&v);
-		if (v.state == (uint8_t)VEH_STATE_SAFE_STOP) {
-			tm_printf((UB*)"[S1] remote START refused: SAFE_STOP, send RESET first\n");
-			return false;
-		}
-		g_go = TRUE;
-		tm_printf((UB*)"[S1] remote START: go\n");
-	} else {
-		g_go = FALSE;
-		b2_stop();
-		tm_printf((UB*)"[S1] remote STOP\n");
-	}
-	return true;
+    if (p_evt->type == (uint8_t)VEH_EVT_START) {
+        vehicle_get_status(&v);
+        if (v.state == (uint8_t)VEH_STATE_SAFE_STOP) {
+            tm_printf((UB*)"[S1] remote START refused: SAFE_STOP, send RESET first\n");
+            return false;
+        }
+        g_go = TRUE;
+        tm_printf((UB*)"[S1] remote START: go\n");
+    } else {
+        g_go = FALSE;
+        b2_stop();
+        tm_printf((UB*)"[S1] remote STOP\n");
+    }
+    return true;
 }
 
 /* Brake first, print after: printing is slow. The brake stays latched
  * (S2 ignores START) until safety_reset_while_stopped(). */
 void safety_raise_estop(uint8_t source, uint32_t t_rx_us)
 {
-	b2_status_t	m;
-	UW		took_us;
+    b2_status_t     m;
+    UW              took_us;
 
-	(void)source;
-	g_go = FALSE;
-	b2_emergency_brake();
-	took_us = (UW)((UW)app_time_us_64() - t_rx_us);
-	g_remote_estop = TRUE;
+    (void)source;
+    g_go = FALSE;
+    b2_emergency_brake();
+    took_us = (UW)((UW)app_time_us_64() - t_rx_us);
+    g_remote_estop = TRUE;
 
-	b2_get_status(&m);
-	if (m.brake_latched) {
-		tm_printf((UB*)"[S1] remote E-STOP: brake latched %d us after rx\n",
-			  (int)took_us);
-	} else {
-		tm_printf((UB*)"[S1] remote E-STOP: WARNING S2 not ready, brake NOT latched\n");
-	}
+    b2_get_status(&m);
+    if (m.brake_latched) {
+        tm_printf((UB*)"[S1] remote E-STOP: brake latched %d us after rx\n",
+              (int)took_us);
+    } else {
+        tm_printf((UB*)"[S1] remote E-STOP: WARNING S2 not ready, brake NOT latched\n");
+    }
 }
 
 bool safety_reset_while_stopped(void)
 {
-	b2_status_t		m;
-	b4_status_t		i;
-	subsystem5_status_t	u;
+    b2_status_t             m;
+    b4_status_t             i;
+    subsystem5_status_t     u;
 
-	b2_get_status(&m);
-	b4_get_status(&i);
-	subsystem5_get_status(&u);
+    b2_get_status(&m);
+    b4_get_status(&i);
+    subsystem5_get_status(&u);
 
-	g_go = FALSE;			/* never drive off straight after a reset */
-	if (wheels_driven(&m)) {
-		tm_printf((UB*)"[S1] RESET refused: wheels are being driven\n");
-		return false;
-	}
-	/* S2 refuses by itself if an encoder ticked in the last 200 ms. */
-	if ((m.brake_latched || (m.state == B2_FAULT)) &&
-	    !b2_authorized_reset_while_stopped()) {
-		tm_printf((UB*)"[S1] RESET refused: wheels still moving\n");
-		return false;
-	}
-	if (i.lift_latched || (i.fault_mask != 0u)) {
-		/* S4 recalibrates next: the car must be back on the ground
-		   and still for ~0.5 s. */
-		(void)b4_authorized_reset_while_stopped();
-	}
-	if (u.state == subsystem5_STATE_FAULT) {
-		subsystem5_reset_fault_while_stopped();	/* done in S5's task */
-	}
-	g_remote_estop = FALSE;
-	tm_printf((UB*)"[S1] RESET done (brake %d, lift %d, S5 fault %d), send START to drive\n",
-		  (int)m.brake_latched, (int)i.lift_latched, (int)u.fault_mask);
-	return true;
+    g_go = FALSE;                   /* never drive off straight after a reset */
+    if (wheels_driven(&m)) {
+        tm_printf((UB*)"[S1] RESET refused: wheels are being driven\n");
+        return false;
+    }
+    /* S2 refuses by itself if an encoder ticked in the last 200 ms. */
+    if ((m.brake_latched || (m.state == B2_FAULT)) &&
+        !b2_authorized_reset_while_stopped()) {
+        tm_printf((UB*)"[S1] RESET refused: wheels still moving\n");
+        return false;
+    }
+    if (i.lift_latched || (i.fault_mask != 0u)) {
+        /* S4 recalibrates next: the car must be back on the ground
+           and still for ~0.5 s. */
+        (void)b4_authorized_reset_while_stopped();
+    }
+    if (u.state == subsystem5_STATE_FAULT) {
+        subsystem5_reset_fault_while_stopped(); /* done in S5's task */
+    }
+    g_remote_estop = FALSE;
+    tm_printf((UB*)"[S1] RESET done (brake %d, lift %d, S5 fault %d), send START to drive\n",
+          (int)m.brake_latched, (int)i.lift_latched, (int)u.fault_mask);
+    return true;
 }
 
 void barcode_set_mapping(const char *p_map)
 {
-	set_mqtt_action_mapping(p_map[0], p_map[1], p_map[2], p_map[3]);
-	tm_printf((UB*)"[S1] barcode mapping: forward %c, U-turn %c, left %c, right %c\n",
-		  p_map[0], p_map[1], p_map[2], p_map[3]);
+    set_mqtt_action_mapping(p_map[0], p_map[1], p_map[2], p_map[3]);
+    tm_printf((UB*)"[S1] barcode mapping: forward %c, U-turn %c, left %c, right %c\n",
+          p_map[0], p_map[1], p_map[2], p_map[3]);
 }
 
 /* ---- status ------------------------------------------------------------ */
 
 void vehicle_get_status(vehicle_status_t *p_out)
 {
-	b2_status_t		m;
-	b4_status_t		i;
-	subsystem5_status_t	u;
-	LineBarcodeData_t	l;
-	uint8_t			faults = 0u;
-	uint16_t		sys;
+    b2_status_t             m;
+    b4_status_t             i;
+    subsystem5_status_t     u;
+    LineBarcodeData_t       l;
+    uint8_t                 faults = 0u;
+    uint16_t                sys;
 
-	b2_get_status(&m);
-	b4_get_status(&i);
-	subsystem5_get_status(&u);
-	l = get_line_barcode_data_safe();
+    b2_get_status(&m);
+    b4_get_status(&i);
+    subsystem5_get_status(&u);
+    l = get_line_barcode_data_safe();
 
-	/* Most serious first: the first match wins. */
-	if (!s2_ready()) {
-		p_out->state = (uint8_t)VEH_STATE_INIT;
-	} else if (m.brake_latched || (m.state == B2_FAULT) ||
-		   i.lift_latched || (u.state == subsystem5_STATE_FAULT)) {
-		p_out->state = (uint8_t)VEH_STATE_SAFE_STOP;
-	} else if (u.state != subsystem5_STATE_MONITOR) {
-		p_out->state = (uint8_t)VEH_STATE_OBSTACLE_AVOID;
-	} else if (m.state == B2_EXECUTE_GOAL) {
-		/* S5's bypass goals are caught above, so a goal here is S3's
-		   barcode turn or junction advance. */
-		p_out->state = (uint8_t)VEH_STATE_BARCODE_NAV;
-	} else if (m.state == B2_TRACK_SPEED) {
-		p_out->state = l.line_detected? (uint8_t)VEH_STATE_LINE_FOLLOW:
-						(uint8_t)VEH_STATE_LINE_SEARCH;
-	} else {
-		p_out->state = (uint8_t)VEH_STATE_IDLE;
-	}
+    /* Most serious first: the first match wins. */
+    if (!s2_ready()) {
+        p_out->state = (uint8_t)VEH_STATE_INIT;
+    } else if (m.brake_latched || (m.state == B2_FAULT) ||
+           i.lift_latched || (u.state == subsystem5_STATE_FAULT)) {
+        p_out->state = (uint8_t)VEH_STATE_SAFE_STOP;
+    } else if (u.state != subsystem5_STATE_MONITOR) {
+        p_out->state = (uint8_t)VEH_STATE_OBSTACLE_AVOID;
+    } else if (m.state == B2_EXECUTE_GOAL) {
+        /* S5's bypass goals are caught above, so a goal here is S3's
+           barcode turn or junction advance. */
+        p_out->state = (uint8_t)VEH_STATE_BARCODE_NAV;
+    } else if (m.state == B2_TRACK_SPEED) {
+        p_out->state = l.line_detected? (uint8_t)VEH_STATE_LINE_FOLLOW:
+                        (uint8_t)VEH_STATE_LINE_SEARCH;
+    } else {
+        p_out->state = (uint8_t)VEH_STATE_IDLE;
+    }
 
-	/* The only latch is S2's brake (S4 pulls it when the robot is lifted
-	   or overturned, or the IMU fails). */
-	p_out->b_estop_latched = (m.brake_latched != 0u);
-	p_out->estop_source    = g_remote_estop?   (uint8_t)EVT_SRC_REMOTE:
-				 (i.lift_latched || (i.state == B4_STATE_FAULT))?
-						   (uint8_t)EVT_SRC_IMU:
-						   (uint8_t)EVT_SRC_MOTION;
+    /* The only latch is S2's brake (S4 pulls it when the robot is lifted
+       or overturned, or the IMU fails). */
+    p_out->b_estop_latched = (m.brake_latched != 0u);
+    p_out->estop_source    = g_remote_estop?   (uint8_t)EVT_SRC_REMOTE:
+                 (i.lift_latched || (i.state == B4_STATE_FAULT))?
+                           (uint8_t)EVT_SRC_IMU:
+                           (uint8_t)EVT_SRC_MOTION;
 
-	/* CR1: the MQTT byte (bit n = subsystem n) comes from the system mask.
-	   Line loss is not a fault (see line), and S3 has no other fault, so
-	   TLM_FAULT_S3 stays clear as before. */
-	sys = build_fault_mask(&m, &l, &i, &u);
-	if (((sys & SYS_FLT_S2_ALL) != 0u) || (m.state == B2_FAULT)) {
-		faults |= TLM_FAULT_S2;
-	}
-	if ((sys & SYS_FLT_S4_ALL) != 0u) {
-		faults |= TLM_FAULT_S4;
-	}
-	if ((sys & SYS_FLT_S5_ALL) != 0u) {
-		faults |= TLM_FAULT_S5;
-	}
-	p_out->fault_mask = faults;
+    /* CR1: the MQTT byte (bit n = subsystem n) comes from the system mask.
+       Line loss is not a fault (see line), and S3 has no other fault, so
+       TLM_FAULT_S3 stays clear as before. */
+    sys = build_fault_mask(&m, &l, &i, &u);
+    if (((sys & SYS_FLT_S2_ALL) != 0u) || (m.state == B2_FAULT)) {
+        faults |= TLM_FAULT_S2;
+    }
+    if ((sys & SYS_FLT_S4_ALL) != 0u) {
+        faults |= TLM_FAULT_S4;
+    }
+    if ((sys & SYS_FLT_S5_ALL) != 0u) {
+        faults |= TLM_FAULT_S5;
+    }
+    p_out->fault_mask = faults;
 }
 
 void motion_get_status(motion_status_t *p_out)
 {
-	b2_status_t	s;
-	int32_t		mean_mm;
+    b2_status_t     s;
+    int32_t         mean_mm;
 
-	b2_get_status(&s);
-	mean_mm = (s.left_total_mm + s.right_total_mm) / 2;
+    b2_get_status(&s);
+    mean_mm = (s.left_total_mm + s.right_total_mm) / 2;
 
-	p_out->speed_l_mm_s = clamp_bits(clamp_u16(b2_speed_value(s.left_speed_ob)), 10u);
-	p_out->speed_r_mm_s = clamp_bits(clamp_u16(b2_speed_value(s.right_speed_ob)), 10u);
-	p_out->enc_l        = (uint16_t)(s.left_encoder_edges & 0xFFFFu);	/* wraps */
-	p_out->enc_r        = (uint16_t)(s.right_encoder_edges & 0xFFFFu);
-	p_out->distance_cm  = clamp_bits((mean_mm > 0)?
-					 ((uint32_t)mean_mm / MM_PER_CM): 0u, 12u);
+    p_out->speed_l_mm_s = clamp_bits(clamp_u16(b2_speed_value(s.left_speed_ob)), 10u);
+    p_out->speed_r_mm_s = clamp_bits(clamp_u16(b2_speed_value(s.right_speed_ob)), 10u);
+    p_out->enc_l        = (uint16_t)(s.left_encoder_edges & 0xFFFFu);       /* wraps */
+    p_out->enc_r        = (uint16_t)(s.right_encoder_edges & 0xFFFFu);
+    p_out->distance_cm  = clamp_bits((mean_mm > 0)?
+                     ((uint32_t)mean_mm / MM_PER_CM): 0u, 12u);
 }
 
 /* A decoded letter -> what it means under the current mapping (S3's). */
 LOCAL uint8_t barcode_cmd(char c)
 {
-	if (c == '\0') {
-		return (uint8_t)BARCODE_NONE;
-	}
-	switch (get_action_for_character(c)) {
-	case MOVE_FORWARD:	return (uint8_t)BARCODE_STRAIGHT;
-	case MOVE_LEFT:		return (uint8_t)BARCODE_LEFT;
-	case MOVE_RIGHT:	return (uint8_t)BARCODE_RIGHT;
-	case MOVE_UTURN:	return (uint8_t)BARCODE_UTURN;
-	default:		return (uint8_t)BARCODE_INVALID;	/* not mapped */
-	}
+    if (c == '\0') {
+        return (uint8_t)BARCODE_NONE;
+    }
+    switch (get_action_for_character(c)) {
+    case MOVE_FORWARD:      return (uint8_t)BARCODE_STRAIGHT;
+    case MOVE_LEFT:         return (uint8_t)BARCODE_LEFT;
+    case MOVE_RIGHT:        return (uint8_t)BARCODE_RIGHT;
+    case MOVE_UTURN:        return (uint8_t)BARCODE_UTURN;
+    default:                return (uint8_t)BARCODE_INVALID;        /* not mapped */
+    }
 }
 
 void line_get_status(line_status_t *p_out)
 {
-	LineBarcodeData_t	d = get_line_barcode_data_safe();
+    LineBarcodeData_t       d = get_line_barcode_data_safe();
 
-	/* Sensors are active-high (1 = on the line). */
-	p_out->line_state = (uint8_t)((d.ir_left_raw << 1) | d.ir_center_raw);
+    /* Sensors are active-high (1 = on the line). */
+    p_out->line_state = (uint8_t)((d.ir_left_raw << 1) | d.ir_center_raw);
 
-	/* S3's counter (not scanned_char, which lasts one poll, and not
-	 * mbf_barcode, which belongs to line_follow_task). */
-	p_out->barcode_count = d.barcode_count;
-	p_out->last_barcode  = barcode_cmd(s3_code_to_char(d.last_code));
-	p_out->letter_code   = d.last_code;
-	p_out->scan_fail_count = d.scan_fail_count;
-	p_out->scan_elems    = d.last_scan_elems;
-	p_out->scan_result   = d.last_scan_result;
+    /* S3's counter (not scanned_char, which lasts one poll, and not
+     * mbf_barcode, which belongs to line_follow_task). */
+    p_out->barcode_count = d.barcode_count;
+    p_out->last_barcode  = barcode_cmd(s3_code_to_char(d.last_code));
+    p_out->letter_code   = d.last_code;
+    p_out->scan_fail_count = d.scan_fail_count;
+    p_out->scan_elems    = d.last_scan_elems;
+    p_out->scan_result   = d.last_scan_result;
 }
 
 void imu_get_status(imu_status_t *p_out)
 {
-	b4_status_t	s;
-	W		pitch;
+    b4_status_t     s;
+    W               pitch;
 
-	b4_get_status(&s);
-	pitch = (W)s.pitch_cdeg / CDEG_PER_DEG;
-	if (pitch < PITCH_MIN_DEG) {
-		pitch = PITCH_MIN_DEG;
-	} else if (pitch > PITCH_MAX_DEG) {
-		pitch = PITCH_MAX_DEG;
-	}
+    b4_get_status(&s);
+    pitch = (W)s.pitch_cdeg / CDEG_PER_DEG;
+    if (pitch < PITCH_MIN_DEG) {
+        pitch = PITCH_MIN_DEG;
+    } else if (pitch > PITCH_MAX_DEG) {
+        pitch = PITCH_MAX_DEG;
+    }
 
-	/* S4 latches a lift / overturn: count each new latch. */
-	if (s.lift_latched && !g_prev_lift) {
-		g_lift_count++;
-	}
-	g_prev_lift = (s.lift_latched != 0u);
+    /* S4 latches a lift / overturn: count each new latch. */
+    if (s.lift_latched && !g_prev_lift) {
+        g_lift_count++;
+    }
+    g_prev_lift = (s.lift_latched != 0u);
 
-	p_out->pitch_deg    = (int8_t)pitch;
-	p_out->hump_max_mm  = clamp_u8(s.max_hump_height_mm);
-	p_out->last_hump_mm = clamp_u8(s.last_hump_height_mm);
-	p_out->hump_count   = s.hump_count;
-	p_out->lift_count   = g_lift_count;
-	p_out->lift_cause   = (uint8_t)s.lift_cause;
-	p_out->yaw_dps      = s.yaw_rate_dps;
-	p_out->motion       = (uint8_t)s.motion;
-	p_out->up_speed_mm_s = clamp_bits((s.recent_up_speed_mm_s > 0)?
-				(uint32_t)s.recent_up_speed_mm_s: 0u, 10u);
-	p_out->tilt_deg     = clamp_u8((uint32_t)s.tilt_cdeg / CDEG_PER_DEG);
+    p_out->pitch_deg    = (int8_t)pitch;
+    p_out->hump_max_mm  = clamp_u8(s.max_hump_height_mm);
+    p_out->last_hump_mm = clamp_u8(s.last_hump_height_mm);
+    p_out->hump_count   = s.hump_count;
+    p_out->lift_count   = g_lift_count;
+    p_out->lift_cause   = (uint8_t)s.lift_cause;
+    p_out->yaw_dps      = s.yaw_rate_dps;
+    p_out->motion       = (uint8_t)s.motion;
+    p_out->up_speed_mm_s = clamp_bits((s.recent_up_speed_mm_s > 0)?
+                (uint32_t)s.recent_up_speed_mm_s: 0u, 10u);
+    p_out->tilt_deg     = clamp_u8((uint32_t)s.tilt_cdeg / CDEG_PER_DEG);
 }
 
 void ultra_get_status(ultra_status_t *p_out)
 {
-	subsystem5_status_t		s;
-	const subsystem5_profile_t	*p = &s.profile;
+    subsystem5_status_t             s;
+    const subsystem5_profile_t      *p = &s.profile;
 
-	subsystem5_get_status(&s);
+    subsystem5_get_status(&s);
 
-	/* One OBSTACLE event per measured profile (S5 counts them, so a
-	   profile is reported even when no safe side follows). */
-	(void)g_prev_scan;
-	g_profile_count = s.profile_count;
+    /* One OBSTACLE event per measured profile (S5 counts them, so a
+       profile is reported even when no safe side follows). */
+    (void)g_prev_scan;
+    g_profile_count = s.profile_count;
 
-	p_out->obstacle_state = (uint8_t)s.state;
-	p_out->fault          = subsystem5_first_fault(s.fault_mask);
-	p_out->bypass_phase   = s.bypass_phase;
-	p_out->nearest_cm     = s.front_valid? clamp_bits(s.front_mm / MM_PER_CM, 9u):
-					       NO_ECHO_CM;
-	p_out->profile_count  = g_profile_count;
-	p_out->centre_deg     = clamp_u8(p->closest_angle_deg);
-	p_out->width_cm       = clamp_u8(p->approximate_width_mm / MM_PER_CM);
-	p_out->clear_l_cm     = p->left_clearance_valid?
-				clamp_bits(p->left_clearance_mm / MM_PER_CM, 9u): 0u;
-	p_out->clear_r_cm     = p->right_clearance_valid?
-				clamp_bits(p->right_clearance_mm / MM_PER_CM, 9u): 0u;
-	p_out->decision       = (uint8_t)p->candidate_side;
-	{
-		uint32_t k;
+    p_out->obstacle_state = (uint8_t)s.state;
+    p_out->fault          = subsystem5_first_fault(s.fault_mask);
+    p_out->bypass_phase   = s.bypass_phase;
+    p_out->nearest_cm     = s.front_valid? clamp_bits(s.front_mm / MM_PER_CM, 9u):
+                           NO_ECHO_CM;
+    p_out->profile_count  = g_profile_count;
+    p_out->centre_deg     = clamp_u8(p->closest_angle_deg);
+    p_out->width_cm       = clamp_u8(p->approximate_width_mm / MM_PER_CM);
+    p_out->clear_l_cm     = p->left_clearance_valid?
+                clamp_bits(p->left_clearance_mm / MM_PER_CM, 9u): 0u;
+    p_out->clear_r_cm     = p->right_clearance_valid?
+                clamp_bits(p->right_clearance_mm / MM_PER_CM, 9u): 0u;
+    p_out->decision       = (uint8_t)p->candidate_side;
+    {
+        uint32_t k;
 
-		for (k = 0u; k < 5u; k++) {
-			p_out->raw_cm[k] = s.coarse_cm[k];
-		}
-	}
+        for (k = 0u; k < 5u; k++) {
+            p_out->raw_cm[k] = s.coarse_cm[k];
+        }
+    }
 }

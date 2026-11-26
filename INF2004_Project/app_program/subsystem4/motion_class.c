@@ -1,6 +1,6 @@
 /*
- *	motion_class.c
- *	Subsystem 4 -- turn rate and motion classification (see motion_class.h).
+ *      motion_class.c
+ *      Subsystem 4 -- turn rate and motion classification (see motion_class.h).
  */
 
 #include "motion_class.h"

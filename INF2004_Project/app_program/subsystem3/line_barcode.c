@@ -1,31 +1,31 @@
 /*
- *	line_barcode.c
- *	Subsystem 3 -- line sensors + Code 39 barcode decoder.
+ *      line_barcode.c
+ *      Subsystem 3 -- line sensors + Code 39 barcode decoder.
  *
- *	This ONE file holds these things, in this order:
- *	  1. the driver / decoder
- *	  2. line following and barcode turns (line_follow_task)
- *	  3. the subsystem glue the template needs (subsystem3_init/_start,
- *	     the barcode task)
+ *      This ONE file holds these things, in this order:
+ *        1. the driver / decoder
+ *        2. line following and barcode turns (line_follow_task)
+ *        3. the subsystem glue the template needs (subsystem3_init/_start,
+ *           the barcode task)
  *
- *	Ported from the Pico SDK version.  Every change is marked "PORT:".
+ *      Ported from the Pico SDK version.  Every change is marked "PORT:".
  *
- *	Call rules (TEAM.md section 3: one owning task per peripheral):
- *	  - line_barcode_create()  once, from subsystem3_init()
- *	  - line_barcode_init() and process_sensors_distance_packed()
- *	    only from the barcode task
- *	  - get_line_barcode_data_safe() / set_mqtt_action_mapping()
- *	    may be called from any task
+ *      Call rules (TEAM.md section 3: one owning task per peripheral):
+ *        - line_barcode_create()  once, from subsystem3_init()
+ *        - line_barcode_init() and process_sensors_distance_packed()
+ *          only from the barcode task
+ *        - get_line_barcode_data_safe() / set_mqtt_action_mapping()
+ *          may be called from any task
  */
 
 #include "line_barcode.h"
 #include "../test_report.h"
 #include "../app_hw.h"
 #include "../subsystem2/tkernel_adapter.h"
-#include "../subsystem2/motion_cal.h"	/* B2_CAL_TURN_TICKS_PER_DEG_X10 */
+#include "../subsystem2/motion_cal.h"   /* B2_CAL_TURN_TICKS_PER_DEG_X10 */
 #include "../subsystem4/tkernel_adapter.h"
 #include "../subsystem5/ultrasonic.h"
-#include "../subsystem1/subsystem1.h"	/* S1: s1_mission_go() (IF-18) */
+#include "../subsystem1/subsystem1.h"   /* S1: s1_mission_go() (IF-18) */
 
 /* =====================================================================
  *  1. Driver / decoder
@@ -42,7 +42,7 @@
  * microseconds; TIMERAWL (offset 0x28) reads the low 32 bits without
  * latching, so it does not disturb the kernel's own use of the timer.
  */
-#define RP2040_TIMERAWL		(*(volatile uint32_t *)0x40054028u)
+#define RP2040_TIMERAWL         (*(volatile uint32_t *)0x40054028u)
 
 static inline uint32_t time_us_32(void)
 {
@@ -74,7 +74,7 @@ ER line_barcode_create(void)
 {
     T_CMTX cmtx = {0};
 
-    cmtx.mtxatr = TA_INHERIT;	/* priority inheritance */
+    cmtx.mtxatr = TA_INHERIT;   /* priority inheritance */
     g_mtx = tk_cre_mtx(&cmtx);
     return (g_mtx < E_OK) ? g_mtx : E_OK;
 }
@@ -105,8 +105,8 @@ static const Code39Map CODE39_TABLE[] = {
     {'Y', 0b110010000}, {'Z', 0b011010000}
 };
 
-#define CODE39_STAR_PATTERN	0b010010100
-#define CODE39_FRAME_ELEMENTS	29	/* '*' gap letter gap '*' */
+#define CODE39_STAR_PATTERN     0b010010100
+#define CODE39_FRAME_ELEMENTS   29      /* '*' gap letter gap '*' */
 
 static LineBarcodeData_t g_system_data = {0};
 
@@ -125,7 +125,7 @@ static volatile uint32_t g_mqtt_map = 0U;
  * CR1: uint16_t in 8 us units (max 524 ms, saturating) instead of uint32_t
  * microseconds: half the RAM.  A 1 mm bar at 70 mm/s is ~14 000 us, so the
  * 8 us step is far below the decoder's narrow/wide margin. */
-#define S3_WIDTH_UNIT_US	(8U)
+#define S3_WIDTH_UNIT_US        (8U)
 static uint16_t g_widths[MAX_BARS];
 static uint32_t g_last_edge_time = 0;
 static uint32_t g_edge_pending_since = 0;
@@ -135,13 +135,13 @@ static uint32_t g_last_success_decode_time = 0;
  * writer, so the bit-field read-modify-write cannot race).  scan_active is
  * also READ by line_follow_task on the other core: hence volatile. */
 static volatile struct {
-    uint8_t width_count : 6;		/* 0..MAX_BARS (60) */
+    uint8_t width_count : 6;            /* 0..MAX_BARS (60) */
     uint8_t last_sensor_state : 1;
     uint8_t sensor_state_initialized : 1;
-    uint8_t edge_pending : 1;		/* GP16 changed, not yet held */
+    uint8_t edge_pending : 1;           /* GP16 changed, not yet held */
     uint8_t have_successful_decode : 1;
-    uint8_t scan_active : 1;		/* GP16 is collecting a barcode (first
-					   edge until the quiet timeout) */
+    uint8_t scan_active : 1;            /* GP16 is collecting a barcode (first
+                       edge until the quiet timeout) */
     uint8_t : 5;
 } g_bc;
 
@@ -167,17 +167,19 @@ void set_mqtt_action_mapping(char char_fwd,
         ((uint32_t)s3_char_to_code(char_uturn) << S3_MAP_UTURN) |
         ((uint32_t)s3_char_to_code(char_left)  << S3_MAP_LEFT) |
         ((uint32_t)s3_char_to_code(char_right) << S3_MAP_RIGHT);
-    data_lock();	/* PORT: was save_and_disable_interrupts() */
-    g_mqtt_map = map;	/* CR1: one store */
-    data_unlock();	/* PORT: was restore_interrupts() */
+    data_lock();        /* PORT: was save_and_disable_interrupts() */
+    g_mqtt_map = map;   /* CR1: one store */
+    data_unlock();      /* PORT: was restore_interrupts() */
 }
 
 MovementAction_t get_action_for_character(char c)
 {
     const uint32_t code = s3_char_to_code(c);
-    const uint32_t map = g_mqtt_map;	/* CR1: one consistent read */
+    const uint32_t map = g_mqtt_map;    /* CR1: one consistent read */
 
-    if (code == S3_CODE_NONE) return MOVE_NONE;
+    if (code == S3_CODE_NONE) {
+        return MOVE_NONE;
+    }
 
     if (((map >> S3_MAP_FWD) & S3_MAP_MASK) == code)
         return MOVE_FORWARD;
@@ -206,9 +208,9 @@ void line_barcode_init(void)
 
 LineBarcodeData_t get_line_barcode_data_safe(void)
 {
-    data_lock();	/* PORT */
+    data_lock();        /* PORT */
     LineBarcodeData_t copy = g_system_data;
-    data_unlock();	/* PORT */
+    data_unlock();      /* PORT */
     return copy;
 }
 
@@ -253,7 +255,9 @@ static bool classify_nine(const uint32_t raw[9], uint16_t *pattern_out)
     uint32_t sorted[9];
 
     for (int i = 0; i < 9; ++i) {
-        if (raw[i] == 0) return false;
+        if (raw[i] == 0) {
+            return false;
+        }
     }
 
     const int32_t offset = ((int32_t)second_smallest(raw, 0, 5) -
@@ -261,7 +265,9 @@ static bool classify_nine(const uint32_t raw[9], uint16_t *pattern_out)
 
     for (int i = 0; i < 9; ++i) {
         const int32_t v = (int32_t)raw[i] + (((i % 2) == 0) ? -offset : offset);
-        if (v <= 0) return false;
+        if (v <= 0) {
+            return false;
+        }
         in[i] = (uint32_t)v;
         sorted[i] = in[i];
     }
@@ -280,7 +286,9 @@ static bool classify_nine(const uint32_t raw[9], uint16_t *pattern_out)
     uint32_t max_narrow = sorted[5];
     uint32_t min_wide = sorted[6];
 
-    if (min_wide <= max_narrow) return false;
+    if (min_wide <= max_narrow) {
+        return false;
+    }
 
     /*
      * Reject very weak separation. This ratio is deliberately more tolerant
@@ -300,7 +308,9 @@ static bool classify_nine(const uint32_t raw[9], uint16_t *pattern_out)
         }
     }
 
-    if (wide_count != 3) return false;
+    if (wide_count != 3) {
+        return false;
+    }
 
     *pattern_out = pattern;
     return true;
@@ -325,7 +335,7 @@ static bool classify_at(uint8_t start, uint16_t *pattern_out)
     uint32_t candidate[9];
 
     for (int i = 0; i < 9; ++i) {
-        candidate[i] = g_widths[start + i];	/* 8 us units: ratios kept */
+        candidate[i] = g_widths[start + i];     /* 8 us units: ratios kept */
     }
     return classify_nine(candidate, pattern_out);
 }
@@ -341,40 +351,46 @@ static bool classify_at(uint8_t start, uint16_t *pattern_out)
 static char decode_collected_scan(uint8_t *p_result)
 {
     *p_result = (uint8_t)S3_SCAN_SHORT;
-    if (g_bc.width_count < CODE39_FRAME_ELEMENTS) return '\0';
+    if (g_bc.width_count < CODE39_FRAME_ELEMENTS) {
+        return '\0';
+    }
 
     *p_result = (uint8_t)S3_SCAN_NO_FRAME;
     for (uint8_t start = 0;
          (uint16_t)start + CODE39_FRAME_ELEMENTS <= g_bc.width_count; ++start) {
         uint16_t first, letter, last;
+        bool framed = false;
         bool reversed = false;
 
-        if (!classify_at(start, &first) ||
-            !classify_at((uint8_t)(start + 20u), &last)) {
-            continue;
-        }
-
-        if (first != CODE39_STAR_PATTERN || last != CODE39_STAR_PATTERN) {
-            if (reverse_9bits(first) != CODE39_STAR_PATTERN ||
-                reverse_9bits(last) != CODE39_STAR_PATTERN) {
-                continue;
+        if (classify_at(start, &first) &&
+            classify_at((uint8_t)(start + 20u), &last)) {
+            if ((first == CODE39_STAR_PATTERN) &&
+                (last == CODE39_STAR_PATTERN)) {
+                framed = true;
+            } else if ((reverse_9bits(first) == CODE39_STAR_PATTERN) &&
+                       (reverse_9bits(last) == CODE39_STAR_PATTERN)) {
+                framed = true;
+                reversed = true;
+            } else {
+                /* not framed by '*' at this offset: try the next one */
             }
-            reversed = true;
         }
 
-        /* Framed by '*' at both ends: from here a failure is the letter. */
-        *p_result = (uint8_t)S3_SCAN_BAD_LETTER;
-        if (!classify_at((uint8_t)(start + 10u), &letter)) {
-            continue;
-        }
-        if (reversed) {
-            letter = reverse_9bits(letter);
-        }
+        if (framed) {
+            /* Framed by '*' at both ends: from here a failure is the
+             * letter. */
+            *p_result = (uint8_t)S3_SCAN_BAD_LETTER;
+            if (classify_at((uint8_t)(start + 10u), &letter)) {
+                if (reversed) {
+                    letter = reverse_9bits(letter);
+                }
 
-        char c = lookup_code39(letter);
-        if (c != '\0') {
-            *p_result = (uint8_t)S3_SCAN_OK;
-            return c;
+                char c = lookup_code39(letter);
+                if (c != '\0') {
+                    *p_result = (uint8_t)S3_SCAN_OK;
+                    return c;
+                }
+            }
         }
     }
 
@@ -417,9 +433,9 @@ void process_sensors_distance_packed(uint32_t current_ticks,
 
     uint32_t now_us = time_us_32();
     char decoded_char = '\0';
-    bool scan_failed = false;	/* a barcode-sized scan gave no letter */
-    bool scan_done = false;	/* a scan was decoded this call (any result) */
-    uint8_t scan_elems = 0u;	/* its bars + spaces */
+    bool scan_failed = false;   /* a barcode-sized scan gave no letter */
+    bool scan_done = false;     /* a scan was decoded this call (any result) */
+    uint8_t scan_elems = 0u;    /* its bars + spaces */
     uint8_t scan_result = (uint8_t)S3_SCAN_OK;
 
     /*
@@ -448,7 +464,7 @@ void process_sensors_distance_packed(uint32_t current_ticks,
             g_bc.edge_pending = 0U;
         }
     } else {
-        g_bc.edge_pending = 0U;	/* flicker ended: back to the old level */
+        g_bc.edge_pending = 0U; /* flicker ended: back to the old level */
     }
 
     uint32_t quiet_time = now_us - g_last_edge_time;
@@ -491,7 +507,7 @@ void process_sensors_distance_packed(uint32_t current_ticks,
                 g_last_success_decode_time = now_us;
                 g_bc.have_successful_decode = 1U;
             } else {
-                scan_failed = true;	/* reported to S1 below */
+                scan_failed = true;     /* reported to S1 below */
             }
         }
 #if APP_BARCODE_ONLY
@@ -513,7 +529,7 @@ void process_sensors_distance_packed(uint32_t current_ticks,
     uint8_t line_state = (ir_left || ir_center) ? 1u : 0u;
     uint8_t cross_state = (ir_left && ir_center) ? 1u : 0u;
 
-    data_lock();	/* PORT: was save_and_disable_interrupts() */
+    data_lock();        /* PORT: was save_and_disable_interrupts() */
 
     g_system_data.ir_left_raw = ir_left ? 1u : 0u;
     g_system_data.ir_center_raw = ir_center ? 1u : 0u;
@@ -521,18 +537,18 @@ void process_sensors_distance_packed(uint32_t current_ticks,
     g_system_data.line_detected = line_state;
     g_system_data.cross_junction = cross_state;
     g_system_data.scanned_code = s3_char_to_code(decoded_char);
-    if (decoded_char != '\0') {	/* S1: kept for slow readers (telemetry) */
+    if (decoded_char != '\0') { /* S1: kept for slow readers (telemetry) */
         g_system_data.barcode_count++;
         g_system_data.last_code = s3_char_to_code(decoded_char);
     }
 
     g_system_data.fault_mask = line_state ? 0U : FAULT_LINE_LOSS;
-    if (scan_done) {	/* set before either counter moves, same lock */
+    if (scan_done) {    /* set before either counter moves, same lock */
         g_system_data.last_scan_elems = scan_elems;
         g_system_data.last_scan_result = scan_result;
     }
     if (scan_failed) {
-        g_system_data.scan_fail_count++;	/* 2-bit, wraps */
+        g_system_data.scan_fail_count++;        /* 2-bit, wraps */
     }
 
     if (out_data != NULL) {
@@ -542,7 +558,7 @@ void process_sensors_distance_packed(uint32_t current_ticks,
     /* One-cycle event: the caller receives the character through out_data. */
     g_system_data.scanned_code = S3_CODE_NONE;
 
-    data_unlock();	/* PORT: was restore_interrupts() */
+    data_unlock();      /* PORT: was restore_interrupts() */
 }
 
 
@@ -569,7 +585,7 @@ void process_sensors_distance_packed(uint32_t current_ticks,
  *  monitoring normally with no stop request.
  * ===================================================================== */
 
-EXPORT ID	mbf_barcode;	/* IF-01, see line_barcode.h */
+EXPORT ID       mbf_barcode;    /* IF-01, see line_barcode.h */
 
 #if APP_MISSION_ENABLE
 
@@ -578,10 +594,10 @@ EXPORT ID	mbf_barcode;	/* IF-01, see line_barcode.h */
 #endif
 
 typedef enum {
-	LF_IDLE = 0,	/* wheels stopped, waiting for a line */
-	LF_FOLLOW,
-	LF_ADVANCE,	/* driving the wheels onto the junction */
-	LF_TURN		/* pivoting, counting lines, for the stored barcode */
+    LF_IDLE = 0,    /* wheels stopped, waiting for a line */
+    LF_FOLLOW,
+    LF_ADVANCE,     /* driving the wheels onto the junction */
+    LF_TURN         /* pivoting, counting lines, for the stored barcode */
 } line_follow_state_t;
 
 /* CR1: line_follow_task flags, one bit each (were BOOLs, 4 bytes each).
@@ -589,18 +605,18 @@ typedef enum {
  * following is also read by S5 from another task (s3_line_following()):
  * hence volatile. */
 static volatile struct {
-	uint8_t following : 1;
-	uint8_t hold : 1;		/* holding straight for a barcode scan */
-	uint8_t searching : 1;
-	uint8_t turning : 1;
-	uint8_t last_go_left : 1;
-	uint8_t exiting : 1;
-	uint8_t : 2;
+    uint8_t following : 1;
+    uint8_t hold : 1;               /* holding straight for a barcode scan */
+    uint8_t searching : 1;
+    uint8_t turning : 1;
+    uint8_t last_go_left : 1;
+    uint8_t exiting : 1;
+    uint8_t : 2;
 } s_lf;
 
 EXPORT BOOL s3_line_following(void)
 {
-	return (s_lf.following != 0U) ? TRUE : FALSE;
+    return (s_lf.following != 0U) ? TRUE : FALSE;
 }
 
 /* TRUE when S3 may drive: the operator sent START (S1), no S5 obstacle
@@ -608,391 +624,391 @@ EXPORT BOOL s3_line_following(void)
    recalibrate, and moving then would ruin it). */
 static BOOL line_follow_allowed(void)
 {
-	subsystem5_status_t s5;
-	b2_status_t s2;
-	b4_status_t s4;
+    subsystem5_status_t s5;
+    b2_status_t s2;
+    b4_status_t s4;
 
-	subsystem5_get_status(&s5);
-	b2_get_status(&s2);
-	b4_get_status(&s4);
-	return s1_mission_go() &&
-	       (s5.state == subsystem5_STATE_MONITOR) && (s5.stop_required == 0U) &&
-	       (s2.brake_latched == 0U) && (s2.state != B2_FAULT) &&
-	       (s4.calibration_ready != 0U);
+    subsystem5_get_status(&s5);
+    b2_get_status(&s2);
+    b4_get_status(&s4);
+    return s1_mission_go() &&
+           (s5.state == subsystem5_STATE_MONITOR) && (s5.stop_required == 0U) &&
+           (s2.brake_latched == 0U) && (s2.state != B2_FAULT) &&
+           (s4.calibration_ready != 0U);
 }
 
 static void line_follow_drive(const LineBarcodeData_t *d, BOOL *line_is_left)
 {
-	static uint32_t hold_since = 0u;
-	static uint32_t search_since = 0u;
-	static uint32_t last_call = 0u;
-	static uint32_t steer_since = 0u;
-	static uint32_t exit_since = 0u;
-	b2_command_t cmd = {0};
+    static uint32_t hold_since = 0u;
+    static uint32_t search_since = 0u;
+    static uint32_t last_call = 0u;
+    static uint32_t steer_since = 0u;
+    static uint32_t exit_since = 0u;
+    b2_command_t cmd = {0};
 
-	/* Not called for a while (stopped, junction turn): start fresh. */
-	if ((uint32_t)(app_time_us_32() - last_call) >
-	    (10u * S3_FOLLOW_PERIOD_MS * 1000u)) {
-		s_lf.searching = 0U;
-		s_lf.turning = 0U;
-		s_lf.exiting = 0U;
-	}
-	last_call = app_time_us_32();
+    /* Not called for a while (stopped, junction turn): start fresh. */
+    if ((uint32_t)(app_time_us_32() - last_call) >
+        (10u * S3_FOLLOW_PERIOD_MS * 1000u)) {
+        s_lf.searching = 0U;
+        s_lf.turning = 0U;
+        s_lf.exiting = 0U;
+    }
+    last_call = app_time_us_32();
 
-	/* Hold straight while a barcode is being scanned: the barcode sensor is
-	   on the right, so steering would change its speed mid-scan and stretch
-	   some bars (inner wheel ~0 mm/s), and the letter would not decode.
-	   Capped so stray GP16 edges cannot lock the steering.
-	   Only while the centre sensor is still on the line: on a right-hand
-	   curve the line itself passes under GP16, and holding straight then
-	   drives the car off the curve. */
-	if ((g_bc.scan_active != 0U) && d->ir_center_raw) {
-		if (!s_lf.hold) {
-			s_lf.hold = 1U;
-			hold_since = app_time_us_32();
-		}
-	} else {
-		s_lf.hold = 0U;
-	}
+    /* Hold straight while a barcode is being scanned: the barcode sensor is
+       on the right, so steering would change its speed mid-scan and stretch
+       some bars (inner wheel ~0 mm/s), and the letter would not decode.
+       Capped so stray GP16 edges cannot lock the steering.
+       Only while the centre sensor is still on the line: on a right-hand
+       curve the line itself passes under GP16, and holding straight then
+       drives the car off the curve. */
+    if ((g_bc.scan_active != 0U) && d->ir_center_raw) {
+        if (!s_lf.hold) {
+            s_lf.hold = 1U;
+            hold_since = app_time_us_32();
+        }
+    } else {
+        s_lf.hold = 0U;
+    }
 
-	cmd.type = B2_CMD_SPEED;
-	if (s_lf.hold && ((uint32_t)(app_time_us_32() - hold_since) <
-		     (S3_SCAN_HOLD_MAX_MS * 1000u))) {
-		cmd.left_mm_s = S3_LINE_SPEED_MM_S;
-		cmd.right_mm_s = S3_LINE_SPEED_MM_S;
-	} else if (d->ir_center_raw) {
-		/* If the line now leaves the centre and the left sensor does not
-		   see it, it went right (or the car crossed it while turning
-		   left), so the next search starts to the right.  The older
-		   "search the last turn side first" memory was tuned with GP2/GP4
-		   crossed; with correct wiring it searched the wrong way after
-		   every overshoot (2026-11-16 19:44 log: left/right sweeps for
-		   10 s with the centre never settling on the line). */
-		*line_is_left = FALSE;
-		if (s_lf.turning) {
-			s_lf.turning = 0U;
-			s_lf.exiting = 1U;
-			exit_since = app_time_us_32();
-		}
-		/* Soft exit: on a curve the line keeps bending, so snapping to
-		   straight the moment the centre finds it makes the car leave the
-		   line again on the same side (straight/steer/straight zig-zag).
-		   Keep a gentle arc the same way for S3_STEER_EXIT_MS, unless the
-		   sensor on the other side sees the line (overshot: go straight). */
-		if (s_lf.exiting &&
-		    ((uint32_t)(app_time_us_32() - exit_since) <
-		     (S3_STEER_EXIT_MS * 1000u)) &&
-		    !(s_lf.last_go_left ? d->ir_right_raw : d->ir_left_raw)) {
-			cmd.left_mm_s = s_lf.last_go_left ? S3_STEER_EXIT_INNER_MM_S
-						     : S3_LINE_SPEED_MM_S;
-			cmd.right_mm_s = s_lf.last_go_left ? S3_LINE_SPEED_MM_S
-						      : S3_STEER_EXIT_INNER_MM_S;
-		} else {
-			s_lf.exiting = 0U;
-			cmd.left_mm_s = S3_LINE_SPEED_MM_S;
-			cmd.right_mm_s = S3_LINE_SPEED_MM_S;
-		}
-	} else {
-		s_lf.exiting = 0U;
-		BOOL go_left = *line_is_left;
+    cmd.type = B2_CMD_SPEED;
+    if (s_lf.hold && ((uint32_t)(app_time_us_32() - hold_since) <
+             (S3_SCAN_HOLD_MAX_MS * 1000u))) {
+        cmd.left_mm_s = S3_LINE_SPEED_MM_S;
+        cmd.right_mm_s = S3_LINE_SPEED_MM_S;
+    } else if (d->ir_center_raw) {
+        /* If the line now leaves the centre and the left sensor does not
+           see it, it went right (or the car crossed it while turning
+           left), so the next search starts to the right.  The older
+           "search the last turn side first" memory was tuned with GP2/GP4
+           crossed; with correct wiring it searched the wrong way after
+           every overshoot (2026-11-16 19:44 log: left/right sweeps for
+           10 s with the centre never settling on the line). */
+        *line_is_left = FALSE;
+        if (s_lf.turning) {
+            s_lf.turning = 0U;
+            s_lf.exiting = 1U;
+            exit_since = app_time_us_32();
+        }
+        /* Soft exit: on a curve the line keeps bending, so snapping to
+           straight the moment the centre finds it makes the car leave the
+           line again on the same side (straight/steer/straight zig-zag).
+           Keep a gentle arc the same way for S3_STEER_EXIT_MS, unless the
+           sensor on the other side sees the line (overshot: go straight). */
+        if (s_lf.exiting &&
+            ((uint32_t)(app_time_us_32() - exit_since) <
+             (S3_STEER_EXIT_MS * 1000u)) &&
+            !(s_lf.last_go_left ? d->ir_right_raw : d->ir_left_raw)) {
+            cmd.left_mm_s = s_lf.last_go_left ? S3_STEER_EXIT_INNER_MM_S
+                             : S3_LINE_SPEED_MM_S;
+            cmd.right_mm_s = s_lf.last_go_left ? S3_LINE_SPEED_MM_S
+                              : S3_STEER_EXIT_INNER_MM_S;
+        } else {
+            s_lf.exiting = 0U;
+            cmd.left_mm_s = S3_LINE_SPEED_MM_S;
+            cmd.right_mm_s = S3_LINE_SPEED_MM_S;
+        }
+    } else {
+        s_lf.exiting = 0U;
+        BOOL go_left = *line_is_left;
 
-		if (d->ir_left_raw) {
-			*line_is_left = TRUE;
-			go_left = TRUE;
-			s_lf.searching = 0U;
-		} else if (d->ir_right_raw) {
-			/* Centre lost and GP16 (right of the centre) sees black:
-			   the line has bent right under the barcode sensor. */
-			*line_is_left = FALSE;
-			go_left = FALSE;
-			s_lf.searching = 0U;
-		} else {
-			/* Neither sensor: the side is only a guess (the line can sit
-			   in the gap between the left and centre sensors), so sweep:
-			   the guessed side first, then back past the start the other
-			   way until S3_LINE_LOST_MS. */
-			if (!s_lf.searching) {
-				s_lf.searching = 1U;
-				search_since = app_time_us_32();
-			}
-			if ((uint32_t)(app_time_us_32() - search_since) >=
-			    (S3_SEARCH_SWAP_MS * 1000u)) {
-				go_left = !*line_is_left;
-			}
-		}
-		/* Gentle arc first; if the centre has not found the line again
-		   soon, slow the inner wheel to -S3_STEER_HARD_MM_S (0 = stopped:
-		   turn about that wheel) for curves tighter than the arc
-		   (~16 cm radius) and for s_lf.searching. */
-		{
-			int16_t inner = S3_STEER_INNER_MM_S;
+        if (d->ir_left_raw) {
+            *line_is_left = TRUE;
+            go_left = TRUE;
+            s_lf.searching = 0U;
+        } else if (d->ir_right_raw) {
+            /* Centre lost and GP16 (right of the centre) sees black:
+               the line has bent right under the barcode sensor. */
+            *line_is_left = FALSE;
+            go_left = FALSE;
+            s_lf.searching = 0U;
+        } else {
+            /* Neither sensor: the side is only a guess (the line can sit
+               in the gap between the left and centre sensors), so sweep:
+               the guessed side first, then back past the start the other
+               way until S3_LINE_LOST_MS. */
+            if (!s_lf.searching) {
+                s_lf.searching = 1U;
+                search_since = app_time_us_32();
+            }
+            if ((uint32_t)(app_time_us_32() - search_since) >=
+                (S3_SEARCH_SWAP_MS * 1000u)) {
+                go_left = !*line_is_left;
+            }
+        }
+        /* Gentle arc first; if the centre has not found the line again
+           soon, slow the inner wheel to -S3_STEER_HARD_MM_S (0 = stopped:
+           turn about that wheel) for curves tighter than the arc
+           (~16 cm radius) and for s_lf.searching. */
+        {
+            int16_t inner = S3_STEER_INNER_MM_S;
 
-			if (!s_lf.turning || (go_left != s_lf.last_go_left)) {
-				steer_since = app_time_us_32();
-			} else if ((uint32_t)(app_time_us_32() - steer_since) >=
-				   (S3_STEER_HARD_MS * 1000u)) {
-				inner = -S3_STEER_HARD_MM_S;
-			}
-			cmd.left_mm_s = go_left ? inner : S3_STEER_SPEED_MM_S;
-			cmd.right_mm_s = go_left ? S3_STEER_SPEED_MM_S : inner;
-		}
-		s_lf.turning = 1U;
-		s_lf.last_go_left = go_left ? 1U : 0U;
-	}
-	if (d->ir_center_raw) {
-		s_lf.searching = 0U;
-	}
-	(void)b2_submit_command(&cmd);
+            if (!s_lf.turning || (go_left != s_lf.last_go_left)) {
+                steer_since = app_time_us_32();
+            } else if ((uint32_t)(app_time_us_32() - steer_since) >=
+                   (S3_STEER_HARD_MS * 1000u)) {
+                inner = -S3_STEER_HARD_MM_S;
+            }
+            cmd.left_mm_s = go_left ? inner : S3_STEER_SPEED_MM_S;
+            cmd.right_mm_s = go_left ? S3_STEER_SPEED_MM_S : inner;
+        }
+        s_lf.turning = 1U;
+        s_lf.last_go_left = go_left ? 1U : 0U;
+    }
+    if (d->ir_center_raw) {
+        s_lf.searching = 0U;
+    }
+    (void)b2_submit_command(&cmd);
 }
 
 /* Goals are only accepted from READY, so stop the speed tracking first. */
 static BOOL line_follow_goal(b2_goal_t *goal, b2_cmd_type_t type,
-			     uint16_t amount)
+                 uint16_t amount)
 {
-	b2_command_t cmd = {0};
+    b2_command_t cmd = {0};
 
-	cmd.type = type;
-	if (type == B2_CMD_MOVE_FORWARD) {
-		cmd.distance_mm = amount;
-	} else {
-		cmd.turn_degrees = amount;
-	}
-	cmd.goal_speed_mm_s = S3_TURN_SPEED_MM_S;
-	cmd.timeout_ms = S3_TURN_TIMEOUT_MS;
+    cmd.type = type;
+    if (type == B2_CMD_MOVE_FORWARD) {
+        cmd.distance_mm = amount;
+    } else {
+        cmd.turn_degrees = amount;
+    }
+    cmd.goal_speed_mm_s = S3_TURN_SPEED_MM_S;
+    cmd.timeout_ms = S3_TURN_TIMEOUT_MS;
 
-	b2_stop();
-	return b2_goal_start(goal, &cmd);
+    b2_stop();
+    return b2_goal_start(goal, &cmd);
 }
 
 static void line_follow_task(INT stacd, void *exinf)
 {
-	line_follow_state_t state = LF_IDLE;
-	LineBarcodeData_t d;
-	b2_goal_t goal;
-	BOOL line_is_left = FALSE;
-	BOOL junction_armed = TRUE;
-	uint32_t lost_since = 0u;
-	BOOL after_s5 = FALSE;	/* held by an S5 obstacle bypass */
-	uint32_t junction_since = 0u;
-	uint32_t turn_since = 0u;
-	BOOL turn_left_start = FALSE;	/* centre has left the starting line */
-	BOOL turn_center = FALSE;	/* debounced centre sensor */
-	uint8_t turn_debounce = 0u;
-	uint8_t turn_skip = 0u;		/* lines still to pass before stopping */
-	uint32_t turn_edges0 = 0u;	/* S2 encoder edges (L+R) at turn start */
-	BOOL on_junction = FALSE;
-	MovementAction_t action = MOVE_NONE;
-	char stored = '\0';
-	char ch;
+    line_follow_state_t state = LF_IDLE;
+    LineBarcodeData_t d;
+    b2_goal_t goal;
+    BOOL line_is_left = FALSE;
+    BOOL junction_armed = TRUE;
+    uint32_t lost_since = 0u;
+    BOOL after_s5 = FALSE;  /* held by an S5 obstacle bypass */
+    uint32_t junction_since = 0u;
+    uint32_t turn_since = 0u;
+    BOOL turn_left_start = FALSE;   /* centre has left the starting line */
+    BOOL turn_center = FALSE;       /* debounced centre sensor */
+    uint8_t turn_debounce = 0u;
+    uint8_t turn_skip = 0u;         /* lines still to pass before stopping */
+    uint32_t turn_edges0 = 0u;      /* S2 encoder edges (L+R) at turn start */
+    BOOL on_junction = FALSE;
+    MovementAction_t action = MOVE_NONE;
+    char stored = '\0';
+    char ch;
 
-	(void)stacd; (void)exinf;
+    (void)stacd; (void)exinf;
 
-	/* Moving during S4's calibration would ruin it, and without S4 there is
-	   no impact brake, so wait for both before the first move. */
-	(void)tk_dly_tsk(S3_START_DELAY_MS);
-	tm_printf((UB*)"[S3] waiting for S2 ready and S4 calibration\n");
-	for (;;) {
-		b4_status_t s4;
+    /* Moving during S4's calibration would ruin it, and without S4 there is
+       no impact brake, so wait for both before the first move. */
+    (void)tk_dly_tsk(S3_START_DELAY_MS);
+    tm_printf((UB*)"[S3] waiting for S2 ready and S4 calibration\n");
+    for (;;) {
+        b4_status_t s4;
 
-		if (s2_ready() && s4_ready()) {
-			b4_get_status(&s4);
-			if (s4.calibration_ready != 0U) {
-				break;
-			}
-		}
-		(void)tk_dly_tsk(100);
-	}
-	tm_printf((UB*)"[S3] line following armed\n");
+        if (s2_ready() && s4_ready()) {
+            b4_get_status(&s4);
+            if (s4.calibration_ready != 0U) {
+                break;
+            }
+        }
+        (void)tk_dly_tsk(100);
+    }
+    tm_printf((UB*)"[S3] line following armed\n");
 
-	while (1) {
-		d = get_line_barcode_data_safe();
+    while (1) {
+        d = get_line_barcode_data_safe();
 
-		if (!line_follow_allowed()) {
-			subsystem5_status_t s5;
+        if (!line_follow_allowed()) {
+            subsystem5_status_t s5;
 
-			subsystem5_get_status(&s5);
-			/* 20 Nov: remember an S5 bypass (it ends by stopping the car
-			   on the line); a FAULT or a STOP from S1 does not count. */
-			if (!s1_mission_go() || (s5.state == subsystem5_STATE_FAULT)) {
-				after_s5 = FALSE;
-			} else if (s5.state != subsystem5_STATE_MONITOR) {
-				after_s5 = TRUE;
-			} else {
-				/* unchanged */
-			}
-			if (state != LF_IDLE) {
-				b2_stop();
-				state = LF_IDLE;
-				tm_printf((UB*)"[S3] holding: no START (S1), S4 calibrating, or S5 or S2 needs the wheels stopped\n");
-			}
-		} else if (state == LF_IDLE) {
-			/* After an S5 bypass, follow at once: the bypass stops the car
-			   on the line, and if it rolled just off the tape, the 2.5 s
-			   line search (S3_LINE_LOST_MS) finds it again. Before, S3
-			   waited for a sensor on the line and the car stood still. */
-			if (d.line_detected || after_s5) {
-				state = LF_FOLLOW;
-				lost_since = app_time_us_32();
-				tm_printf((UB*)(after_s5 ? "[S3] back from the bypass, following\n"
-						       : "[S3] line found, following\n"));
-				after_s5 = FALSE;
-			}
-		}
+            subsystem5_get_status(&s5);
+            /* 20 Nov: remember an S5 bypass (it ends by stopping the car
+               on the line); a FAULT or a STOP from S1 does not count. */
+            if (!s1_mission_go() || (s5.state == subsystem5_STATE_FAULT)) {
+                after_s5 = FALSE;
+            } else if (s5.state != subsystem5_STATE_MONITOR) {
+                after_s5 = TRUE;
+            } else {
+                /* unchanged */
+            }
+            if (state != LF_IDLE) {
+                b2_stop();
+                state = LF_IDLE;
+                tm_printf((UB*)"[S3] holding: no START (S1), S4 calibrating, or S5 or S2 needs the wheels stopped\n");
+            }
+        } else if (state == LF_IDLE) {
+            /* After an S5 bypass, follow at once: the bypass stops the car
+               on the line, and if it rolled just off the tape, the 2.5 s
+               line search (S3_LINE_LOST_MS) finds it again. Before, S3
+               waited for a sensor on the line and the car stood still. */
+            if (d.line_detected || after_s5) {
+                state = LF_FOLLOW;
+                lost_since = app_time_us_32();
+                tm_printf((UB*)(after_s5 ? "[S3] back from the bypass, following\n"
+                               : "[S3] line found, following\n"));
+                after_s5 = FALSE;
+            }
+        }
 
-		/* Store the newest barcode for the next junction. */
-		while (tk_rcv_mbf(mbf_barcode, &ch, TMO_POL) == 1) {
-			stored = ch;
-			tm_printf((UB*)"[S3] barcode '%c' stored\n", ch);
-		}
+        /* Store the newest barcode for the next junction. */
+        while (tk_rcv_mbf(mbf_barcode, &ch, TMO_POL) == 1) {
+            stored = ch;
+            tm_printf((UB*)"[S3] barcode '%c' stored\n", ch);
+        }
 
-		if (state == LF_ADVANCE) {
-			const b2_goal_result_t result = b2_goal_check(&goal);
+        if (state == LF_ADVANCE) {
+            const b2_goal_result_t result = b2_goal_check(&goal);
 
-			if (result == B2_GOAL_DONE) {
-				/* Wheels on the junction: pivot and count lines. */
-				state = LF_TURN;
-				turn_since = app_time_us_32();
-				turn_left_start = FALSE;
-				turn_center = TRUE;	/* assume on the line we came on */
-				turn_debounce = 0u;
-				/* A junction is only detected with the left sensor on
-				   black, so a left branch always exists; a U-turn
-				   (pivots left) passes it, then stops on the line it
-				   came in on.  Left/right stop on the first line. */
-				turn_skip = (action == MOVE_UTURN) ? 1u : 0u;
-				{
-					b2_status_t s2;
+            if (result == B2_GOAL_DONE) {
+                /* Wheels on the junction: pivot and count lines. */
+                state = LF_TURN;
+                turn_since = app_time_us_32();
+                turn_left_start = FALSE;
+                turn_center = TRUE;     /* assume on the line we came on */
+                turn_debounce = 0u;
+                /* A junction is only detected with the left sensor on
+                   black, so a left branch always exists; a U-turn
+                   (pivots left) passes it, then stops on the line it
+                   came in on.  Left/right stop on the first line. */
+                turn_skip = (action == MOVE_UTURN) ? 1u : 0u;
+                {
+                    b2_status_t s2;
 
-					b2_get_status(&s2);
-					turn_edges0 = s2.left_encoder_edges +
-						      s2.right_encoder_edges;
-				}
-			} else if (result == B2_GOAL_FAILED) {
-				state = LF_IDLE;
-				tm_printf((UB*)"[S3] junction advance failed\n");
-			}
-		} else if (state == LF_TURN) {
-			/* Sensor-only turn: no encoder angle, because the turn angle
-			   from the provisional wheel calibration was ~1.7x too large
-			   and carried the car past the line it wanted (2026-11-19
-			   videos: U-turn -> turned 270 deg, right -> turned 180 deg).
-			   Centre sensor state is debounced over S3_TURN_DEBOUNCE
-			   loops.  First wait to leave the line the car is on, then
-			   count each line the centre sensor reaches. */
-			const BOOL timed_out =
-			    ((uint32_t)(app_time_us_32() - turn_since) >=
-			     (S3_TURN_MAX_MS * 1000u)) ? TRUE : FALSE;
-			BOOL found = FALSE;
-			BOOL past_min;
-			{
-				b2_status_t s2;
+                    b2_get_status(&s2);
+                    turn_edges0 = s2.left_encoder_edges +
+                              s2.right_encoder_edges;
+                }
+            } else if (result == B2_GOAL_FAILED) {
+                state = LF_IDLE;
+                tm_printf((UB*)"[S3] junction advance failed\n");
+            }
+        } else if (state == LF_TURN) {
+            /* Sensor-only turn: no encoder angle, because the turn angle
+               from the provisional wheel calibration was ~1.7x too large
+               and carried the car past the line it wanted (2026-11-19
+               videos: U-turn -> turned 270 deg, right -> turned 180 deg).
+               Centre sensor state is debounced over S3_TURN_DEBOUNCE
+               loops.  First wait to leave the line the car is on, then
+               count each line the centre sensor reaches. */
+            const BOOL timed_out =
+                ((uint32_t)(app_time_us_32() - turn_since) >=
+                 (S3_TURN_MAX_MS * 1000u)) ? TRUE : FALSE;
+            BOOL found = FALSE;
+            BOOL past_min;
+            {
+                b2_status_t s2;
 
-				/* Both wheels' edges (wrap-safe unsigned sum):
-				   a pivot of A deg is 2 * A * ticks/deg. */
-				b2_get_status(&s2);
-				past_min = ((uint32_t)(s2.left_encoder_edges +
-						       s2.right_encoder_edges -
-						       turn_edges0) * 10u >=
-					    2u * S3_TURN_MIN_DEG *
-					    B2_CAL_TURN_TICKS_PER_DEG_X10) ? TRUE : FALSE;
-			}
+                /* Both wheels' edges (wrap-safe unsigned sum):
+                   a pivot of A deg is 2 * A * ticks/deg. */
+                b2_get_status(&s2);
+                past_min = ((uint32_t)(s2.left_encoder_edges +
+                               s2.right_encoder_edges -
+                               turn_edges0) * 10u >=
+                        2u * S3_TURN_MIN_DEG *
+                        B2_CAL_TURN_TICKS_PER_DEG_X10) ? TRUE : FALSE;
+            }
 
-			if ((d.ir_center_raw ? TRUE : FALSE) != turn_center) {
-				if (++turn_debounce >= S3_TURN_DEBOUNCE) {
-					turn_center = !turn_center;
-					turn_debounce = 0u;
-					if (!turn_center) {
-						turn_left_start = TRUE;
-					} else if (turn_left_start && past_min) {
-						if (turn_skip > 0u) {
-							--turn_skip;
-							tm_printf((UB*)"[S3] turn: passed a branch\n");
-						} else {
-							found = TRUE;
-						}
-					}
-				}
-			} else {
-				turn_debounce = 0u;
-			}
+            if ((d.ir_center_raw ? TRUE : FALSE) != turn_center) {
+                if (++turn_debounce >= S3_TURN_DEBOUNCE) {
+                    turn_center = !turn_center;
+                    turn_debounce = 0u;
+                    if (!turn_center) {
+                        turn_left_start = TRUE;
+                    } else if (turn_left_start && past_min) {
+                        if (turn_skip > 0u) {
+                            --turn_skip;
+                            tm_printf((UB*)"[S3] turn: passed a branch\n");
+                        } else {
+                            found = TRUE;
+                        }
+                    }
+                }
+            } else {
+                turn_debounce = 0u;
+            }
 
-			if (found || timed_out) {
-				state = LF_FOLLOW;
-				lost_since = app_time_us_32();
-				/* Found: if the pivot carries the car past the line, it
-				   went too far the turn's way, so search back first.
-				   Timed out: the normal search sweeps both ways. */
-				line_is_left = (action == MOVE_RIGHT) ? TRUE : FALSE;
-				tm_printf((UB*)"[S3] turn: %s after %d ms of pivot\n",
-					  timed_out ? "line NOT found" : "line found",
-					  (int)((uint32_t)(app_time_us_32() -
-							   turn_since) / 1000u));
-			} else {
-				b2_command_t cmd = {0};
-				const BOOL go_left = (action != MOVE_RIGHT) ? TRUE : FALSE;
+            if (found || timed_out) {
+                state = LF_FOLLOW;
+                lost_since = app_time_us_32();
+                /* Found: if the pivot carries the car past the line, it
+                   went too far the turn's way, so search back first.
+                   Timed out: the normal search sweeps both ways. */
+                line_is_left = (action == MOVE_RIGHT) ? TRUE : FALSE;
+                tm_printf((UB*)"[S3] turn: %s after %d ms of pivot\n",
+                      timed_out ? "line NOT found" : "line found",
+                      (int)((uint32_t)(app_time_us_32() -
+                               turn_since) / 1000u));
+            } else {
+                b2_command_t cmd = {0};
+                const BOOL go_left = (action != MOVE_RIGHT) ? TRUE : FALSE;
 
-				cmd.type = B2_CMD_SPEED;
-				cmd.left_mm_s = go_left ? -S3_TURN_PIVOT_MM_S
-							:  S3_TURN_PIVOT_MM_S;
-				cmd.right_mm_s = -cmd.left_mm_s;
-				(void)b2_submit_command(&cmd);
-			}
-		} else if (state == LF_FOLLOW) {
-			if (d.line_detected) {
-				lost_since = app_time_us_32();
-			}
+                cmd.type = B2_CMD_SPEED;
+                cmd.left_mm_s = go_left ? -S3_TURN_PIVOT_MM_S
+                            :  S3_TURN_PIVOT_MM_S;
+                cmd.right_mm_s = -cmd.left_mm_s;
+                (void)b2_submit_command(&cmd);
+            }
+        } else if (state == LF_FOLLOW) {
+            if (d.line_detected) {
+                lost_since = app_time_us_32();
+            }
 
-			/* One action per junction: re-arm only after leaving it. */
-			if (!d.cross_junction) {
-				on_junction = FALSE;
-				junction_armed = TRUE;
-			} else if (!on_junction) {
-				on_junction = TRUE;
-				junction_since = app_time_us_32();
-			}
-			if (on_junction && junction_armed &&
-			    ((uint32_t)(app_time_us_32() - junction_since) >=
-			     (S3_JUNCTION_CONFIRM_MS * 1000u))) {
-				junction_armed = FALSE;
-				action = get_action_for_character(stored);
-				tm_printf((UB*)"[S3] junction, barcode '%c' -> action %d\n",
-					  (stored != '\0') ? stored : '-', (int)action);
-				stored = '\0';
-				if ((action == MOVE_LEFT) || (action == MOVE_RIGHT) ||
-				    (action == MOVE_UTURN)) {
-					if (line_follow_goal(&goal, B2_CMD_MOVE_FORWARD,
-					    S3_JUNCTION_ADVANCE_MM)) {
-						state = LF_ADVANCE;
-					} else {
-						state = LF_IDLE;
-						tm_printf((UB*)"[S3] junction advance refused\n");
-					}
-					s_lf.following = (state == LF_FOLLOW) ? 1U : 0U;
-					(void)tk_dly_tsk(S3_FOLLOW_PERIOD_MS);
-					continue;
-				}
-			}
+            /* One action per junction: re-arm only after leaving it. */
+            if (!d.cross_junction) {
+                on_junction = FALSE;
+                junction_armed = TRUE;
+            } else if (!on_junction) {
+                on_junction = TRUE;
+                junction_since = app_time_us_32();
+            }
+            if (on_junction && junction_armed &&
+                ((uint32_t)(app_time_us_32() - junction_since) >=
+                 (S3_JUNCTION_CONFIRM_MS * 1000u))) {
+                junction_armed = FALSE;
+                action = get_action_for_character(stored);
+                tm_printf((UB*)"[S3] junction, barcode '%c' -> action %d\n",
+                      (stored != '\0') ? stored : '-', (int)action);
+                stored = '\0';
+                if ((action == MOVE_LEFT) || (action == MOVE_RIGHT) ||
+                    (action == MOVE_UTURN)) {
+                    if (line_follow_goal(&goal, B2_CMD_MOVE_FORWARD,
+                        S3_JUNCTION_ADVANCE_MM)) {
+                        state = LF_ADVANCE;
+                    } else {
+                        state = LF_IDLE;
+                        tm_printf((UB*)"[S3] junction advance refused\n");
+                    }
+                    s_lf.following = (state == LF_FOLLOW) ? 1U : 0U;
+                    (void)tk_dly_tsk(S3_FOLLOW_PERIOD_MS);
+                    continue;
+                }
+            }
 
-			if ((uint32_t)(app_time_us_32() - lost_since) >=
-			    (S3_LINE_LOST_MS * 1000u)) {
-				b2_stop();
-				state = LF_IDLE;
-				tm_printf((UB*)"[S3] line lost, stopped\n");
-			} else {
-				line_follow_drive(&d, &line_is_left);
-			}
-		}
+            if ((uint32_t)(app_time_us_32() - lost_since) >=
+                (S3_LINE_LOST_MS * 1000u)) {
+                b2_stop();
+                state = LF_IDLE;
+                tm_printf((UB*)"[S3] line lost, stopped\n");
+            } else {
+                line_follow_drive(&d, &line_is_left);
+            }
+        }
 
-		s_lf.following = (state == LF_FOLLOW) ? 1U : 0U;
-		(void)tk_dly_tsk(S3_FOLLOW_PERIOD_MS);
-	}
+        s_lf.following = (state == LF_FOLLOW) ? 1U : 0U;
+        (void)tk_dly_tsk(S3_FOLLOW_PERIOD_MS);
+    }
 }
 
 #else /* !APP_MISSION_ENABLE */
 
 EXPORT BOOL s3_line_following(void)
 {
-	return FALSE;	/* no line following in this build */
+    return FALSE;   /* no line following in this build */
 }
 
 #endif /* APP_MISSION_ENABLE */
@@ -1004,68 +1020,68 @@ EXPORT BOOL s3_line_following(void)
 /* The barcode task.  Owns GP2, GP4 and GP16 (TEAM.md section 3). */
 static void barcode_task(INT stacd, void *exinf)
 {
-	LineBarcodeData_t data;
+    LineBarcodeData_t data;
 
-	(void)stacd; (void)exinf;
+    (void)stacd; (void)exinf;
 
-	line_barcode_init();		/* set the pins up inside the owning task */
+    line_barcode_init();            /* set the pins up inside the owning task */
 
-	while (1) {
-		process_sensors_distance_packed(0, &data);
+    while (1) {
+        process_sensors_distance_packed(0, &data);
 
-		if (data.scanned_code != S3_CODE_NONE) {
-			char ch = s3_code_to_char(data.scanned_code);
+        if (data.scanned_code != S3_CODE_NONE) {
+            char ch = s3_code_to_char(data.scanned_code);
 
-			/* TMO_POL: never block here; drop the char if the
-			   buffer is full rather than miss the next edges. */
-			tk_snd_mbf(mbf_barcode, &ch, 1, TMO_POL);
-			tm_printf((UB*)"[barcode] '%c'\n", ch);
-		}
+            /* TMO_POL: never block here; drop the char if the
+               buffer is full rather than miss the next edges. */
+            tk_snd_mbf(mbf_barcode, &ch, 1, TMO_POL);
+            tm_printf((UB*)"[barcode] '%c'\n", ch);
+        }
 
 #if S3_POLL_DELAY_MS > 0
-		tk_dly_tsk(S3_POLL_DELAY_MS);
+        tk_dly_tsk(S3_POLL_DELAY_MS);
 #endif
-	}
+    }
 }
 
 EXPORT ER subsystem3_init(void)
 {
-	T_CMBF	cmbf = {0};
-	ER	er;
+    T_CMBF  cmbf = {0};
+    ER      er;
 
-	/* Mutex that protects the driver's shared data */
-	er = line_barcode_create();
-	if (er < E_OK) {
-		return er;
-	}
+    /* Mutex that protects the driver's shared data */
+    er = line_barcode_create();
+    if (er < E_OK) {
+        return er;
+    }
 
-	/* Message buffer: decoded characters, 1 byte each, a few queued */
-	cmbf.mbfatr = TA_TFIFO;
-	cmbf.bufsz  = 64;		/* room for a few queued chars (+ headers) */
-	cmbf.maxmsz = 1;
-	mbf_barcode = tk_cre_mbf(&cmbf);
-	if (mbf_barcode < E_OK) {
-		return mbf_barcode;
-	}
+    /* Message buffer: decoded characters, 1 byte each, a few queued */
+    cmbf.mbfatr = TA_TFIFO;
+    cmbf.bufsz  = 64;               /* room for a few queued chars (+ headers) */
+    cmbf.maxmsz = 1;
+    mbf_barcode = tk_cre_mbf(&cmbf);
+    if (mbf_barcode < E_OK) {
+        return mbf_barcode;
+    }
 #if APP_MISSION_ENABLE && S3_BENCH_MAPPING
-	set_mqtt_action_mapping(S3_BENCH_FORWARD, S3_BENCH_UTURN,
-				S3_BENCH_LEFT, S3_BENCH_RIGHT);
+    set_mqtt_action_mapping(S3_BENCH_FORWARD, S3_BENCH_UTURN,
+                S3_BENCH_LEFT, S3_BENCH_RIGHT);
 #endif
-	return E_OK;
+    return E_OK;
 }
 
 EXPORT ER subsystem3_start(void)
 {
-	/* Pinned to core 1 (TP_PRC2): the polling loop never sleeps, so keep
-	   it away from core 0.  The pin is ignored on a single-core build. */
-	ID tid = app_start_task(barcode_task, S3_PRI_MAIN, TP_PRC2,
-				"barcode_task");
+    /* Pinned to core 1 (TP_PRC2): the polling loop never sleeps, so keep
+       it away from core 0.  The pin is ignored on a single-core build. */
+    ID tid = app_start_task(barcode_task, S3_PRI_MAIN, TP_PRC2,
+                "barcode_task");
 #if APP_MISSION_ENABLE
-	if (tid >= E_OK) {
-		/* Core 0: it sleeps between loops, and core 1 is kept busy. */
-		tid = app_start_task(line_follow_task, S3_FOLLOW_PRI, TP_PRC1,
-				     "line_follow_task");
-	}
+    if (tid >= E_OK) {
+        /* Core 0: it sleeps between loops, and core 1 is kept busy. */
+        tid = app_start_task(line_follow_task, S3_FOLLOW_PRI, TP_PRC1,
+                     "line_follow_task");
+    }
 #endif
-	return (tid < E_OK) ? tid : E_OK;
+    return (tid < E_OK) ? tid : E_OK;
 }

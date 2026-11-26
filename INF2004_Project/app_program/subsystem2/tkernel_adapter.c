@@ -10,7 +10,7 @@
  * owning task configures its peripherals.
  */
 #include "tkernel_adapter.h"
-#include "motion_cal.h"	/* measured calibration: the one place it lives */
+#include "motion_cal.h" /* measured calibration: the one place it lives */
 
 /* CR1 (R9): calibration is constant, so it lives in flash. b2_init keeps a
    pointer to it instead of a RAM copy. */

@@ -15,8 +15,8 @@ Week 13 evidence for Change Requirement 1. Branch `cr1/min-bit`; the "before" bu
 - **Inter-task messages are 25–50 % smaller.** For example, the S5 obstacle event went from 32 to 20 B and the S2 command mailbox from 16 to 8 B.
 - **MQTT payloads are compact binary.** A status frame is 21 B, against 257 B for the same data as JSON text (8 %). This was already true before the change (Buddy 1's codec), so the wire format is unchanged.
 - **One system-wide fault bitmask** gives each fault its own bit: motor stall, IMU fault, no echo, Wi-Fi loss and so on.
-- **No loss of functionality on the host.** For S3, S4 and S5, the pre-CR1 and CR1 code were run side by side on the same simulated sensor input and gave identical results. S1 and S2 have new unit tests. In total over 200,000 simulated cases and about 2,100 unit checks pass.
-- **Timing has not been measured on the car yet.** The checklist is in §4.
+- **No loss of functionality on the host.** For S3, S4 and S5, the pre-CR1 and CR1 code were run side by side on the same simulated sensor input and gave identical results at the CR1 commit. (A 23 Nov re-run shows S3 decoding 0.4 % fewer simulated scans after later, non-CR1 barcode changes, still with no wrong letters; see §3.) S1 and S2 have new unit tests. In total over 200,000 simulated cases and about 2,100 unit checks pass.
+- **Timing on the car:** the pre-CR1 baseline (13 and 16 Nov floor logs) and the before/after measurements are in §4.
 
 ## 1. RAM usage
 
@@ -103,10 +103,10 @@ The script rebuilds the pre-CR1 code from tag `pre-cr1` automatically, so each o
 | Subsystem | Test | Result |
 |---|---|---|
 | S1 | Existing codec test (wire format unchanged) | PASS |
-| S1 | [test_s1_adapters.c](host_test/test_s1_adapters.c): real `team_adapters.c`. Every fault sets exactly its own system-mask bit, the MQTT fault byte follows the pre-CR1 rules, values saturate at their field width instead of wrapping, barcode letters map to the right movement, and the letter and "seen, not decoded" count reach S1 | 109/109 checks |
+| S1 | [test_s1_adapters.c](host_test/test_s1_adapters.c): real `team_adapters.c`. Every fault sets exactly its own system-mask bit, the MQTT fault byte follows the pre-CR1 rules, values saturate at their field width instead of wrapping, barcode letters map to the right movement, and the letter and "seen, not decoded" count reach S1 | 109/109 checks (112/112 on the 23 Nov re-run) |
 | S2 | [test_s2_motion.c](host_test/test_s2_motion.c): real `motion.c` with a simulated clock and encoder ISR. Covers packing at every range edge, refusing out-of-range requests (never truncating), MOVE goal distance and speed, the 32-bit clock wrapping mid-run, stall fault and reset, emergency brake latch, odometry saturation, and every lock released. Since 19 Nov also B2's additions on a simple motor model (deadband, lag, 10 % weaker right motor): straight-line correction (27 → 1 tick of drift over 5 s), per-wheel calibration, D term stability, the move/turn API, and S5's tick constants unchanged | 1,974/1,974 checks (1,093 at the CR1 commit) |
-| S3 | [s3_driver.c](host_test/s3_driver.c): old vs new `line_barcode.c` on 3,000 simulated Code 39 scans (random letter, speed, narrow:wide ratio, ±25 % jitter, both directions, damaged scans), plus the barcode map | **Identical**: 2,927 decoded, all correct, none wrong. All 73 undecoded scans reported as "seen, not decoded" |
-| S1 + dashboard | [barcode_event_enc.c](host_test/barcode_event_enc.c) + [test_barcode_event.py](host_test/test_barcode_event.py): every letter A–Z, 0–9, plus "seen, not decoded" and INVALID, encoded by the C codec and decoded by the real `dashboard.py`; old 5-byte events still decode | 82/82 checks |
+| S3 | [s3_driver.c](host_test/s3_driver.c): old vs new `line_barcode.c` on 3,000 simulated Code 39 scans (random letter, speed, narrow:wide ratio, ±25 % jitter, both directions, damaged scans), plus the barcode map | At the CR1 commit: **identical**, 2,927 decoded, all correct, none wrong; all 73 undecoded scans reported as "seen, not decoded". **23 Nov re-run** (after the post-CR1 barcode scan-diagnosis changes, `85cd8b2`): 2,914 correct (pre-CR1 2,927, −0.4 %), **0 wrong**; all 86 undecoded scans reported (19 no frame, 67 bad letter). The difference comes after CR1 and is not from the bit packing; it is listed for transparency |
+| S1 + dashboard | [barcode_event_enc.c](host_test/barcode_event_enc.c) + [test_barcode_event.py](host_test/test_barcode_event.py): every letter A–Z, 0–9, plus "seen, not decoded" and INVALID, encoded by the C codec and decoded by the real `dashboard.py`; old 5-byte events still decode | 82/82 checks (177/177 on the 23 Nov re-run, after the 7-byte BARCODE event) |
 | S4 | [s4_driver.c](host_test/s4_driver.c): old vs new `imu.c`/`terrain.c`/`posture.c` on 12 simulated runs: calibrate, drive, hump, turn, **lifted → motors stopped**, reset, **overturned → motors stopped**, I2C fault | **Identical**: 2,074 status/event lines, 12 humps, 24 lift/overturn stops, locks balanced |
 | S5 | [test_s5_profile.c](host_test/test_s5_profile.c): old vs new `profile.c` on 200,000 random scans | **Identical**: 0 mismatches over 16 fields |
 
@@ -137,19 +137,37 @@ A bit-field write is a read-modify-write of the whole storage unit, so every pac
 - **Bit-field access:** a few extra instructions per access, which is the +0.6 % flash.
 - **Algorithms:** no thresholds, filters or tuned constants were changed.
 
-### To measure on the car (not done yet: no hardware access this week)
+### Measured: pre-CR1 baseline from the floor logs
 
-Run each item on the `pre-cr1` build first, then on `cr1/min-bit`, and record both.
+All dashboard logs in `testing/subsystem1/logs/` were captured before CR1 was merged (18 Nov), so they are the "before" side. Figures from `testing/tools/analyse_logs.py` (re-run 23 Nov):
 
-| # | Measurement | How |
-|---|---|---|
-| T1 | S2 control-loop deadline misses | `deadline_misses` in `b2_status_t`; test S1-U17 checks it does not grow under telemetry load |
-| T2 | Telemetry task worst-case loop time | `S1_DIAG.loop_max_us` (`s1_tlm_get_diag()`, printed by the S1 tests) |
-| T3 | Status frame rate (5 Hz target) | Dashboard CSV timestamps over a 5-minute run |
-| T4 | Lift → motors stopped | S4-M01: pick the car up while it drives; it must stop at once and stay stopped until RESET |
-| T5 | Full course run | Line, barcode, hump, obstacle: compare telemetry logs before/after |
+| Measurement | 13 Nov (floor, line following) | 16 Nov (floor, groupmate's log) | Target |
+|---|---:|---:|---|
+| Status frame interval, median | 195 ms | 202 ms | 200 ms (5 Hz) |
+| Status frame interval, p95 | 512 ms | 349 ms | |
+| Heartbeat interval, median | 1,017 ms | 964 ms | 1,000 ms |
+| Status frames lost (sequence gaps) | 9.6 % | 1.5 % | |
+| Command ACK round trip, median | 397 ms | 182 ms | |
 
-Results go in the TEST_LOGs under `testing/`.
+The losses and the long tails line up with Wi-Fi reconnects (5 and 4 in those sessions), not with CPU load.
+
+### After CR1: on the car
+
+| # | Measurement | Before (`pre-cr1`) | After (CR1) | How |
+|---|---|---|---|---|
+| T1 | S2 control-loop deadline misses | | | `deadline_misses` in `b2_status_t`; test S1-U17 checks it does not grow under telemetry load |
+| T2 | Telemetry task worst-case loop time | | | `S1_DIAG.loop_max_us` (`s1_tlm_get_diag()`, printed by the S1 tests) |
+| T3 | Status frame interval, median (5 Hz target = 200 ms) | 195 ms (13 Nov) / 202 ms (16 Nov) | | Dashboard CSV over a 5-minute run |
+| T4 | Lift → motors stopped | | | S4-M01: pick the car up while it drives; it must stop at once and stay stopped until RESET |
+| T5 | Full course run | | | Line, barcode, hump, obstacle: compare telemetry logs before/after |
+
+Results also go in the TEST_LOGs under `testing/`.
+
+### Why no degradation is expected
+
+- **Wire load is unchanged.** The STATUS (21 B) and HEARTBEAT frames are the same size before and after. Only the BARCODE event (6 → 7 B, carries the letter) and the MAP command (9 → 8 B) changed, and both are rare. So the network side, which dominates the timings above, sees the same traffic.
+- **CPU cost is a few instructions per field access** (+0.8 % flash, §1). On a 125 MHz RP2040 with 20 ms (S2) and 10 ms (S4) loops, that is far below one loop period.
+- **Behaviour is identical on the host** for S4 and S5 and equivalent for S3 (§3). No threshold, filter or gain was changed.
 
 ## 5. Commits
 

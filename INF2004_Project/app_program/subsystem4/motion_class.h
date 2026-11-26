@@ -1,13 +1,13 @@
 /*
- *	motion_class.h
- *	Subsystem 4 -- turn rate and motion classification.
+ *      motion_class.h
+ *      Subsystem 4 -- turn rate and motion classification.
  *
- *	Pure maths, no hardware (tested in subsystem4_test.c, S4-U09/U10).
- *	The GY-511 has no gyroscope, so the turn (yaw) rate comes from the
- *	difference between S2's left and right wheel speeds:
- *	    yaw rate = (right - left) / wheel track    [rad/s]
- *	Positive = turning left (anticlockwise seen from above).
- *	It is wrong while a wheel slips or the robot is lifted.
+ *      Pure maths, no hardware (tested in subsystem4_test.c, S4-U09/U10).
+ *      The GY-511 has no gyroscope, so the turn (yaw) rate comes from the
+ *      difference between S2's left and right wheel speeds:
+ *          yaw rate = (right - left) / wheel track    [rad/s]
+ *      Positive = turning left (anticlockwise seen from above).
+ *      It is wrong while a wheel slips or the robot is lifted.
  */
 
 #ifndef B4_MOTION_CLASS_H
