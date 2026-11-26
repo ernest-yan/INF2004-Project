@@ -11,6 +11,14 @@ Week 13 evidence for Change Requirement 1. Branch `cr1/min-bit`; the "before" bu
 
 ## Summary
 
+> **Re-measured 26 Nov 2026 on the current `template` build (`5901132`):**
+> - **RAM:** application RAM is **1,249 B**, which is −340 B (−21 %) against the pre-CR1 baseline. That is 111 B more than the 1,138 B at the CR1 commit: S5's 20 Nov bypass rewrite added 96 B (mostly new bypass state kept in full bytes and words), S1 added 10 B and S3 5 B for new telemetry fields. Details in §1.1.
+> - **Messages:** the status frame is now **22 B** (169 bits), which is 8.1 % of the same data as JSON (270 B). Struct and frame changes are in §2.1.
+> - **Correctness:** every host test passes again, now including the S3 junction simulator (§3.1).
+> - **Timing on the car:** the 23 Nov telemetry log is the first post-CR1 measurement (§4, T3).
+>
+> The figures below are from the CR1 commit (18–19 Nov) and are kept as they were.
+
 - **Application RAM: 1,589 → 1,138 bytes (−451 B, −28 %).** Every subsystem went down. (1,122 B at the CR1 commit; +16 B on 19 Nov for B2's per-wheel calibration and straight-line correction, see the note under §1.)
 - **Inter-task messages are 25–50 % smaller.** For example, the S5 obstacle event went from 32 to 20 B and the S2 command mailbox from 16 to 8 B.
 - **MQTT payloads are compact binary.** A status frame is 21 B, against 257 B for the same data as JSON text (8 %). This was already true before the change (Buddy 1's codec), so the wire format is unchanged.
@@ -43,6 +51,34 @@ S1's remaining 378 B is mostly the 289 B raw MQTT receive buffer, which is a byt
 Most of the whole-image RAM belongs to the network stack, the Wi-Fi driver and the kernel, which are outside this change. Flash grows slightly because reading and writing bit-fields takes extra shift and mask instructions. Trading a little flash for RAM is the expected cost of this change.
 
 Kernel memory also shrinks. The S5 event queue is sized from `sizeof(subsystem5_event_t)`, so it drops from 320 to 224 B.
+
+### 1.1 Re-measured on the current build (26 Nov, `5901132`)
+
+Same method: the demo build (`make NET=lwip MQTT=1`, zero warnings), `.data` + `.bss` of each subsystem's object files, test files excluded. The method reproduces the 19 Nov figures exactly for S2 (158 B) and S4 (206 B), which did not change in between. Per-variable list: [current_ram_symbols_2026-11-26.txt](current_ram_symbols_2026-11-26.txt).
+
+| Subsystem | Before CR1 (B) | CR1 commit, 19 Nov (B) | Now, 26 Nov (B) | Now vs before |
+|---|---:|---:|---:|---:|
+| S1 Telemetry / MQTT | 409 | 378 | 388 | −21 (−5 %) |
+| S2 Motion | 263 | 158 | 158 | −105 (−40 %) |
+| S3 Line + barcode | 316 | 167 | 172 | −144 (−46 %) |
+| S4 IMU / terrain | 278 | 206 | 206 | −72 (−26 %) |
+| S5 Ultrasonic / servo | 323 | 229 | **325** | **+2 (+1 %)** |
+| **Application total** | **1,589** | **1,138** | **1,249** | **−340 (−21 %)** |
+
+| Whole image | Before | Now | Change |
+|---|---:|---:|---:|
+| RAM (`data` + `bss`) | 84,256 | 83,896 | −360 |
+| Flash (`text`) | 369,349 | 384,113 | +14,764 (+4.0 %): features added since 18 Nov (no per-subsystem flash baseline was taken, so it is not split here) |
+
+**What grew since the CR1 commit, and why**
+
+| Subsystem | Change | Cause |
+|---|---:|---|
+| S1 | +10 B | Its copies of `line_status_t` (+2 B, barcode scan diagnosis, 19 Nov) and `ultra_status_t` (+8 B, the five raw coarse-scan distances, 20 Nov), kept to detect changes for events |
+| S3 | +5 B | `LineBarcodeData_t` 4 → 5 B (scan result 2 bits + element count 6 bits, 19 Nov), and one new 32-bit timestamp for the soft exit (20 Nov) |
+| S5 | +96 B | 20 Nov bypass rewrite (`58493a2`): a 32 B encoder pose, `subsystem5_status_t` and its snapshot copy 20 → 28 B each (+16 B: bypass step and the five coarse-scan distances), 15 new 32-bit variables (+60 B) and 12 new one-byte variables, minus 6 removed 32-bit variables (−24 B) |
+
+**S5 no longer meets CR1 in full.** About 12 of the new one-byte variables (directions, step counters, flags such as `s_bp_dir_l`, `s_bp_probe`, `s_bp_turn_stopping`) hold 1–3 bits each. Under rule R3 they belong in one or two packed bytes. They are written only by S5's own task, so packing them needs no lock. The new variables are also not yet in [DATA_REPRESENTATION.md](DATA_REPRESENTATION.md). Both are for the S5 owner. Packing them saves about 10 B, which would bring S5 back below its pre-CR1 size of 323 B.
 
 ### Largest single savings
 
@@ -90,6 +126,32 @@ Every frame is bit-packed, most-significant bit first ([tlm_codec.h](../../app_p
 
 The JSON figure comes from the codec's own `tlm_format_status_json()` on the same status values ([json_vs_binary.c](host_test/json_vs_binary.c)). At 5 Hz, binary status costs 105 B/s against about 1,285 B/s as text.
 
+### 2.1 Re-measured on the current build (26 Nov, `5901132`)
+
+**Struct sizes.** These are `sizeof` values from the ARM compiler with the demo build's own flags. Every struct in the tables above was re-measured. Only the ones below changed since the CR1 commit; all the others are as listed above (for example `subsystem5_event_t` 20, S2 mailbox 8, `b2_status_t` 28, `b4_status_t` 32, `S1_STATS` 8).
+
+| Message / shared data | Before CR1 | CR1 commit | Now | What was added |
+|---|---:|---:|---:|---|
+| `LineBarcodeData_t` | 6 | 4 | **5** | Scan result (2 bits) + element count (6 bits), 19 Nov |
+| `line_status_t` | 4 | 3 | **4** | The same scan diagnosis, for telemetry |
+| `ultra_status_t` | 14 | 8 | **16** | Bypass step (3 bits, in spare bits) + the five coarse-scan distances, 1 B each, 20 Nov |
+| `subsystem5_status_t` | 38 | 20 | **28** | Bypass step (3 bits) + five coarse-scan distances (5 B), 20 Nov |
+
+`ultra_status_t` is now 2 B larger than before CR1, because it carries data that did not exist then: the raw scan. The 8 B of CR1-packed fields are unchanged. The 5 raw bytes make 13 B, and the 32-bit bit-field at its start rounds the struct up to 16 B. `subsystem5_status_t` likewise grows from 20 to 26 B of data, padded to 28.
+
+**MQTT payloads.**
+
+| Frame | CR1 commit | Now | What was added |
+|---|---:|---:|---|
+| Status (5 Hz) | 166 bits, 21 B | **169 bits, 22 B** | S5 bypass step (3 bits), 20 Nov |
+| Event (max: obstacle profile) | 78 bits, 10 B | **118 bits, 15 B** | The five coarse-scan distances (5 × 8 bits), 20 Nov |
+| BARCODE event | 41 bits, 6 B | **49 bits, 7 B** | Scan result (2 bits) + element count (6 bits), 19 Nov |
+| Heartbeat, ACK, command, MAP | 11 / 7 / 5 / 8 B | unchanged | |
+
+**Binary vs JSON, re-run** ([json_vs_binary.c](host_test/json_vs_binary.c), current codec): a typical status frame is **22 B binary against 270 B as JSON (8.1 %)**, and the largest is 22 B against 289 B (7.6 %). At 5 Hz that is 110 B/s against about 1,350 B/s.
+
+The 23 Nov telemetry log carries 22-byte status frames, which confirms that the car was running this build.
+
 ## 3. Correctness: no loss of functionality
 
 All tests run on a laptop with one command:
@@ -111,6 +173,23 @@ The script rebuilds the pre-CR1 code from tag `pre-cr1` automatically, so each o
 | S5 | [test_s5_profile.c](host_test/test_s5_profile.c): old vs new `profile.c` on 200,000 random scans | **Identical**: 0 mismatches over 16 fields |
 
 Both the demo build (`NET=lwip MQTT=1`) and the test build (`TEST=1`) compile with no warnings. The on-target self-tests (S2-U01..U06, S4-U01..U16 and so on) are unchanged and still need to be run on the car.
+
+### 3.1 Re-run on the current build (26 Nov, `5901132`)
+
+Same command. This includes S4's 23 Nov tuning for the 50 mm hump (lift tilt 30 → 38°, longest hump 600 → 1000 mm) and S5's 20 Nov bypass rewrite. **All passed.**
+
+| Test | Result |
+|---|---|
+| S1 adapters + system fault mask | 112 / 112 checks |
+| S2 motion | 1,974 / 1,974 checks |
+| S3 decoder, pre-CR1 vs now | 2,914 / 3,000 correct (pre-CR1 2,927), **0 wrong**; all 86 undecoded scans reported with their reason; maps identical |
+| **S3 junction turns (new in the suite, `s3_junction_sim.c`)** | 40 / 41 junction runs correct; 279 / 280 barcodes decoded while line following, **0 wrong**. The one failure is a course with a left stub between the barcode and the junction. It is an S3 limitation from before CR1, not caused by the bit packing; see [LINE_BARCODE.md §6.1](../../app_program/subsystem3/LINE_BARCODE.md) |
+| S4 IMU, pre-CR1 vs now | **Identical**: 2,074 lines, 12 humps, 24 lift/overturn stops, locks balanced |
+| S5 profile, pre-CR1 vs now | **Identical** on 200,000 random scans |
+| BARCODE event codec → `dashboard.py` | 177 / 177 checks (7-byte frame) |
+| MAP command `dashboard.py` ↔ C codec | 16 / 16 checks |
+
+The demo build (`NET=lwip MQTT=1`) compiles with zero warnings. The test build was not rebuilt on 26 Nov.
 
 ### Concurrency (packed data shared between tasks / ISR)
 
@@ -157,11 +236,27 @@ The losses and the long tails line up with Wi-Fi reconnects (5 and 4 in those se
 |---|---|---|---|---|
 | T1 | S2 control-loop deadline misses | | | `deadline_misses` in `b2_status_t`; test S1-U17 checks it does not grow under telemetry load |
 | T2 | Telemetry task worst-case loop time | | | `S1_DIAG.loop_max_us` (`s1_tlm_get_diag()`, printed by the S1 tests) |
-| T3 | Status frame interval, median (5 Hz target = 200 ms) | 195 ms (13 Nov) / 202 ms (16 Nov) | | Dashboard CSV over a 5-minute run |
+| T3 | Status frame interval, median (5 Hz target = 200 ms) | 195 ms (13 Nov) / 202 ms (16 Nov) | **194 ms** (23 Nov, 2 h 20 min) | Dashboard CSV over a 5-minute run |
 | T4 | Lift → motors stopped | | | S4-M01: pick the car up while it drives; it must stop at once and stay stopped until RESET |
 | T5 | Full course run | | | Line, barcode, hump, obstacle: compare telemetry logs before/after |
 
 Results also go in the TEST_LOGs under `testing/`.
+
+**T3, after CR1 (23 Nov).** The log is [`2026-11-23_demo.csv`](../subsystem1/logs/2026-11-23_demo.csv), analysed with `testing/tools/analyse_logs.py`. It contains 22-byte status frames, so the car ran the post-CR1 build.
+
+| Measurement | 13 Nov (before) | 16 Nov (before) | 23 Nov (after) |
+|---|---:|---:|---:|
+| Status frame interval, median | 195 ms | 202 ms | **194 ms** |
+| Status frame interval, p95 | 512 ms | 349 ms | **294 ms** |
+| Heartbeat interval, median | 1,017 ms | 964 ms | **1,010 ms** |
+| Status frames lost (sequence gaps) | 9.6 % | 1.5 % | **4.0 %** |
+| Wi-Fi reconnects | 5 | 4 | **0** |
+
+The 5 Hz status rate and 1 Hz heartbeat are held after the change, so the packing has not slowed the telemetry task.
+
+**Caveat:** the car stood still in IDLE for that whole session; it was not a course run. So T3 shows the telemetry path only, not the loops under driving load. The losses depend on Wi-Fi conditions, which differ between sessions.
+
+**T1, T2, T4 and T5 still need the car.** Flash the test build (`make TEST=1 NET=lwip MQTT=1`) for T1 (S1-U17 prints S2's `deadline_misses`) and T2 (`loop_max_us` in S1's test output). Then do one logged course run on the demo build, which gives T4 (pick the car up at the end) and T5.
 
 ### Why no degradation is expected
 

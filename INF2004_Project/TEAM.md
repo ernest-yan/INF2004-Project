@@ -220,6 +220,7 @@ Where each deliverable from the Project Write-up and Change Requirement 1 lives.
 | Buddy 2 | PID tuning report | [PID_TUNING_REPORT.md](testing/subsystem2/PID_TUNING_REPORT.md) |
 | Buddy 2 | Motion accuracy evaluation | [MOTION_ACCURACY.md](testing/subsystem2/MOTION_ACCURACY.md) |
 | Buddy 3 | Line-following module, barcode decoder, navigation command interface | `app_program/subsystem3/` |
+| Buddy 3 | Module documentation and evidence | [LINE_BARCODE.md](app_program/subsystem3/LINE_BARCODE.md) |
 | Buddy 4 | IMU processing module, hump detection algorithm | `app_program/subsystem4/` |
 | Buddy 4 | Terrain analysis report | [TERRAIN_ANALYSIS.md](testing/subsystem4/TERRAIN_ANALYSIS.md) |
 | Buddy 5 | Scanning subsystem, obstacle profile generator, avoidance and recovery algorithms | `app_program/subsystem5/` |

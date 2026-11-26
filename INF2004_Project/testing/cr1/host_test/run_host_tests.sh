@@ -72,6 +72,31 @@ else
     echo "S3: barcode -> movement maps DIFFER:"; head -20 "$OUT/s3_diff.txt"; fail=1
 fi
 
+echo "== S3 junction turns + decoding while line following (s3_junction_sim.c) =="
+# The real line_barcode.c drives a simulated car over a cross junction.
+# Known result (26 Nov): 40 of 41 junction runs; the one failure is the
+# "left stub between barcode and junction" course (a sharp left curve there
+# is taken as the junction), see app_program/subsystem3/LINE_BARCODE.md §6.
+# So fewer than 40, or any wrongly decoded letter, fails the suite.
+$S3CC -I"$PROJ/app_program/subsystem3" "$HERE/s3_junction_sim.c" -o "$OUT/s3sim" -lm
+"$OUT/s3sim" > "$OUT/s3sim.txt" || true
+jok=$(sed -n 's#^\([0-9]*\)/\([0-9]*\) junction runs correct#\1#p' "$OUT/s3sim.txt")
+jall=$(sed -n 's#^\([0-9]*\)/\([0-9]*\) junction runs correct#\2#p' "$OUT/s3sim.txt")
+dsum=$(awk '/correct, .* wrong, .* not decoded/ {
+    for (i = 1; i <= NF; i++) {
+        if ($(i+1) == "correct,") { split($i, a, "/"); ok += a[1]; all += a[2] }
+        if ($(i+1) == "wrong,") { bad += $i }
+    }
+} END { printf "%d %d %d", ok, all, bad }' "$OUT/s3sim.txt")
+set -- $dsum
+if [ -n "$jok" ] && [ "$jok" -ge 40 ] && [ "$3" -eq 0 ]; then
+    echo "S3: junction turns $jok/$jall correct; barcodes while line following $1/$2 decoded, $3 wrong"
+    grep 'FAIL' "$OUT/s3sim.txt" | sed 's/^ */S3: known limitation (left stub before the junction): /' || true
+else
+    echo "S3: junction simulator REGRESSED (junction ${jok:-?}/${jall:-?}, wrong letters $3):"
+    grep -E 'FAIL|wrong' "$OUT/s3sim.txt" | head -10; fail=1
+fi
+
 echo "== S4 IMU (lift / overturn / hump): pre-cr1 vs CR1 =="
 $S3CC -I"$OUT/oldtree/INF2004_Project/app_program/subsystem4" "$HERE/s4_driver.c" -o "$OUT/s4_old"
 $S3CC -I"$PROJ/app_program/subsystem4" "$HERE/s4_driver.c" -o "$OUT/s4_new"

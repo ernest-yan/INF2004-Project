@@ -1,6 +1,6 @@
 # Change Requirement 1: data representation table
 
-**Status:** v3, implemented 2026-11-18 on branch `cr1/min-bit`. Decisions D1–D6 approved. Checked against the Project Write-up, the Project Briefing and the IMU change notice. The "After" columns below were planning estimates; the **measured** sizes are in [CR1_REPORT.md](CR1_REPORT.md), and the differences from the plan are listed in "As implemented" at the end of this file.
+**Status:** v3, implemented 2026-11-18 on branch `cr1/min-bit`. Decisions D1–D6 approved. Checked against the Project Write-up, the Project Briefing and the IMU change notice. The "After" columns below were planning estimates; the **measured** sizes are in [CR1_REPORT.md](CR1_REPORT.md), and the differences from the plan are listed in "As implemented" at the end of this file. Fields added after the CR1 commit (19–20 Nov: barcode scan diagnosis, S5 bypass step and raw scan) are at the end of that table, updated 26 Nov 2026.
 
 This table lists each piece of application data in S1–S5, its valid range, the minimum bits it needs, and how it will be stored.
 "Before" sizes come from [BASELINE.md](BASELINE.md). "After" sizes are estimates for now; step 5 replaces them with measured values.
@@ -305,4 +305,9 @@ Packing must not drop or narrow any data the specification asks for.
 | MAP command (MQTT), 19 Nov | 4 × 8-bit ASCII letters (72 bits, 9 B) | 4 × 6-bit letter codes (64 bits, **8 B**) | CR1 covers command payloads too. Same codes as the BARCODE event and S3. `dashboard.py` updated; an old 9-byte MAP is refused (BAD_LEN). |
 | `LineBarcodeData_t.scan_fail_count`, added 19 Nov | – | 2 bits in the existing spare bits (struct stays 4 B) | Counts barcode-sized scans that gave no letter. Scans end ≥ 400 ms apart and S1 reads every 200 ms, so a 2-bit wrapping counter cannot miss one. |
 | `line_status_t`, added 19 Nov | 2 B | 3 B | + letter (6 bits) + failed-scan count (2 bits). |
-
+| `LineBarcodeData_t` scan diagnosis, added 19 Nov | – | `last_scan_result` 2 bits (0 decoded, 1 too short, 2 no `*` frame, 3 bad letter) + `last_scan_elems` 6 bits (0..60 bars + spaces): one new byte, struct **4 → 5 B** | The dashboard shows *why* a barcode was not decoded. Written by the barcode task under S3's mutex, read by S1 through `get_line_barcode_data_safe()`. |
+| `line_status_t`, 19 Nov (scan diagnosis) | 3 B | **4 B**: + the same 2 + 6 bits | S1's copy for the BARCODE event (7 B on the wire, 49 bits). |
+| S3 soft-exit timestamp, added 20 Nov | – | `uint32_t` µs (function static `exit_since`) | Same rule as the other S3 timestamps: µs that wrap, kept 32-bit. |
+| `subsystem5_status_t.bypass_phase`, added 20 Nov | – | 3 bits (7 bypass steps: none, out, pass, return, align, turn, look) | Kept after a FAULT so telemetry shows where a bypass stopped. On the wire: 3 bits in the status frame (**166 → 169 bits, 21 → 22 B**). |
+| `subsystem5_status_t.coarse_cm[5]` / `ultra_status_t.raw_cm[5]`, added 20 Nov | – | 5 × `uint8_t` cm: 0..253 cm, 254 = open, 255 = no echo | Diagnostic copy of the last coarse scan (30–150°). `subsystem5_status_t` **20 → 28 B** and `ultra_status_t` **8 → 16 B** (13 B of data, padded by the 32-bit bit-field). On the wire: 5 × 8 bits in the obstacle event (**78 → 118 bits, 10 → 15 B**). |
+| S5 bypass state, added 20 Nov (`s_pose`, `s_bp_*`) | – | **Not yet in this table.** 15 new 32-bit and 12 new one-byte variables, plus a 32 B encoder pose (CR1_REPORT §1.1) | **For the S5 owner:** add the rows, and pack the one-byte flags and step counters (R3). They are single-writer (S5's task only), so packing needs no lock. |
